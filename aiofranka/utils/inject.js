@@ -2,6 +2,11 @@
 (function() {
     'use strict';
     
+    // Don't inject on login page
+    if (window.location.pathname.startsWith('/login')) {
+        return;
+    }
+    
     // Load xterm.js CSS and JS
     function loadXterm(callback) {
         // CSS

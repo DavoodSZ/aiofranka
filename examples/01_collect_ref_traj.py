@@ -11,6 +11,7 @@ from aiofranka.robot import RobotInterface
 from aiofranka import FrankaController
 import time 
 import os 
+import matplotlib.pyplot as plt
 
 
 async def main():
@@ -18,8 +19,8 @@ async def main():
     # robot = RobotInterface()
     controller = FrankaController(robot)
 
-
     await controller.start()
+
 
     base = np.array([1, 1, 1, 1, 0.6, 0.6, 0.6])
 
@@ -30,11 +31,12 @@ async def main():
 
     
     for kp, kd in kp_kd_pairs:
-
+        
         with controller.state_lock:
             controller.kp = base * 80
             controller.kd = base * 4
-        await controller.move([0, 0, 0.3, -1.57079, 0, 1.57079, -0.7853])
+            print("Moving to initial position...")
+        await controller.move([0, 0, 0.0, -1.57079, 0, 1.57079, -0.7853])
 
 
         print(f"Testing with kp={kp}, kd={kd}")
@@ -68,15 +70,13 @@ async def main():
             init = controller.initial_qpos
             await controller.set("q_desired", delta + init)
 
-        # await controller.stop()
         await asyncio.sleep(1.0)
 
         for key in logs.keys():
             logs[key] = np.stack(logs[key])
         
-        os.makedirs("./examples/sysid/", exist_ok=True)
-        np.savez(f"./examples/sysid/sysid_K{int(kp)}_D{int(kd)}.npz", **logs)
-
-
+        os.makedirs("./examples/sysid_left/", exist_ok=True)
+        np.savez(f"./examples/sysid_left/sysid_K{int(kp)}_D{int(kd)}.npz", **logs)
+        
 if __name__ == "__main__":
     asyncio.run(main())

@@ -128,6 +128,7 @@ class FrankaController:
 
         self.track = False 
         self.torque_diff_limit = 990.
+        self.torque_limit = np.array([87, 87, 87, 87, 12, 12, 12])  # Nm
         
         # Rate limiting for .set() method
         self._update_freq = 50.0  # Default 50Hz
@@ -286,7 +287,8 @@ class FrankaController:
         if sleep_time > 0:
             await asyncio.sleep(sleep_time)
         
-        setattr(self, attr, value)
+        with self.state_lock:
+            setattr(self, attr, value)
         
         # Update last update time to target (not actual) to avoid drift
         self._last_update_time[attr] = target_time
@@ -618,6 +620,8 @@ class FrankaController:
             diff = np.clip(diff, -self.torque_diff_limit, self.torque_diff_limit)
             tau_d = last_torque + diff * 1e-3
 
+            tau_d = np.clip(tau_d, -self.torque_limit, self.torque_limit)
+
         self.torque = tau_d
 
         self.robot.step(tau_d)
@@ -667,11 +671,14 @@ class FrankaController:
             - May fail if target is at joint limits or in collision
         """
         self.type = "impedance"
+        print("setting impedance controller for move...")
 
         inp = InputParameter(7)
 
+        print('getting current state for ruckig...')
         inp.current_position = self.robot.state['qpos']
         inp.current_velocity = self.robot.state['qvel']
+        print("got current state")
         inp.current_acceleration = np.zeros(7)
 
         inp.target_position = np.array(qpos)
@@ -681,14 +688,21 @@ class FrankaController:
         inp.max_velocity = np.ones(7) * 10
         inp.max_acceleration = np.ones(7) * 5 
         inp.max_jerk = np.ones(7)
+
+        print("set input parameters for ruckig")
         
         otg = Ruckig(7)
         trajectory = Trajectory(7)
 
+        print("calculating trajectory...")
         result = otg.calculate(inp, trajectory)
+
+        print(f"Generated trajectory with result: {result}")
+        print(trajectory.duration * 50)
 
         # create a trajectory to the desired qpos  (linear interpolation)
         for i in range(int(trajectory.duration * 50)):
+            print(i, trajectory.duration * 50)
             q_desired, _, _ = trajectory.at_time(i / 50.0)
             await self.set("q_desired", q_desired)
 
