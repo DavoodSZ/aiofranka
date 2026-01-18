@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aiofranka"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Python package for Franka robot control using asyncio."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -22,9 +22,13 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "pylibfranka", 
     "ruckig",
     "numpy",
     "scipy",
+    "mujoco",
+    "tqdm", 
+    "requests",
 ]
 
 [project.optional-dependencies]
@@ -34,5 +38,5 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Improbable-AI/franka-server"
-Repository = "https://github.com/Improbable-AI/franka-server"
+Homepage = "https://github.com/Improbable-AI/aiofranka"
+Repository = "https://github.com/Improbable-AI/aiofranka"

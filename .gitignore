@@ -6,9 +6,13 @@ examples/sysid
 data/
 aiofranka/__pycache__/
 nov_results/
+vel_results/
+examples/sysid_left.zip
+examples/sysid.npz
 examples/checkpoints/
 examples/sysid_left/
 examples/sysid_right/
+vel_results.zip
 
 # Sphinx documentation
 # docs/_build/

@@ -2,13 +2,16 @@ from setuptools import setup, find_packages
 
 setup(
     name="aiofranka",
-    version="0.1.0",
+    version="0.2.0",
     packages=find_packages(),
     install_requires=[
+        "pylibfranka",
         "ruckig", 
         "numpy", 
         "scipy", 
-
+        "mujoco",
+        "tqdm"
+        "requests",
     ],
     author="MIT Improbable AI Lab",
     author_email="",

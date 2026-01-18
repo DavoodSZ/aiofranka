@@ -21,6 +21,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
 parser.add_argument("--gripper", action="store_true", help="Use gripper")
 parser.add_argument("--name", type=str, default="test", help="Name of the experiment")
+parser.add_argument("--dir", type=str, default=".", help="Directory for results")
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -260,7 +261,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     name = args_cli.name
 
-    os.makedirs(f"nov_results/{name}", exist_ok=True)
+    os.makedirs(f"vel_results/{name}", exist_ok=True)
 
     real_data = np.load(f"examples/sysid_left/sysid_{name}.npz")
     # print(real_+d)
@@ -369,6 +370,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         scene.reset()
 
         joint_positions = []
+        joint_velocities = [] 
         joint_targets = []
 
         # get the joint position from the real data
@@ -396,19 +398,22 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 scene.update(sim_dt)
 
             joint_positions.append(scene["Franka"].data.joint_pos.clone().cpu().squeeze().numpy())
+            joint_velocities.append(scene["Franka"].data.joint_vel.clone().cpu().squeeze().numpy())
 
             joint_targets.append(wave_action.clone().cpu().squeeze().numpy())
 
         joint_positions = np.stack(joint_positions, axis = 1)[..., :joint_num]
+        joint_velocities = np.stack(joint_velocities, axis = 1)[..., :joint_num]
         joint_targets = np.stack(joint_targets, axis = 1)[..., :joint_num]
 
         real_joint_positions = real_data["qpos"][:, :joint_num]
+        real_joint_velocities = real_data["qvel"][:, :joint_num]
 
 
         # compute the cost
         # cost = np.abs(error).mean(-1).mean(-1).astype(np.float64)
-        # cost = [spectral_mse(joint_positions[i], real_joint_positions) for i in range(args_cli.num_envs)]
-        cost = np.array([ np.linalg.norm (joint_positions[i] - real_joint_positions) for i in range(args_cli.num_envs) ])
+        cost = [spectral_mse(joint_positions[i], real_joint_positions) + spectral_mse(joint_velocities[i], real_joint_velocities) for i in range(args_cli.num_envs)]
+        # cost = np.array([ np.linalg.norm (joint_positions[i] - real_joint_positions) + np.linalg.norm (joint_velocities[i] - real_joint_velocities) * 1.0 for i in range(args_cli.num_envs) ])
         costs += cost
 
 
@@ -464,11 +469,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             "cost": min_cost
         }
         # save as json (pretty print)
-        os.makedirs(f"nov_results/{name}", exist_ok=True)
+        os.makedirs(f"vel_results/{name}", exist_ok=True)
 
         if min_cost < lowest_loss:
             lowest_loss = min_cost
-            with open(f"nov_results/{name}/best_seed{rand_run_int}.json", "w") as f:
+            with open(f"vel_results/{name}/best_seed{rand_run_int}.json", "w") as f:
                 json.dump(info, f, indent=4)
 
 
@@ -503,7 +508,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # update the mean and sigma
         plots.append(plot)
 
-        imageio.mimsave(f'nov_results/{name}/plots.mp4', plots, fps=10)
+        imageio.mimsave(f'vel_results/{name}/plots.mp4', plots, fps=10)
 
 def spectral_mse(x, y):
     """
@@ -555,7 +560,7 @@ def draw_real_plot(name, cost, generation, joint_positions, joint_targets, real_
     plt.figtext(0.5, 0.06, viscous_friction_txt, ha='center', fontsize=12)
     plt.legend()
     axs[0].set_title(f"Generation {generation} | Cost: {cost:.5f}")
-    plt.savefig(f"nov_results/{name}/plot.png", dpi=300, bbox_inches='tight', pad_inches=0.1)
+    plt.savefig(f"vel_results/{name}/plot.png", dpi=300, bbox_inches='tight', pad_inches=0.1)
 
     # tight layout
     plt.tight_layout()
