@@ -20,31 +20,23 @@ The library is designed for research applications requiring precise, real-time c
 
 
 
+
+
 ## Installation
 
-### Prerequisites
+Make sure you can access Franka Desk GUI from your machine's browser by typing in the robot's IP (e.g. 172.16.0.2). Then, install: 
 
-1. **libfranka and pylibfranka**: Required for real robot control
-   ```bash
-   git clone https://github.com/frankarobotics/libfranka
-   cd libfranka
-   # now follow official Franka instructions to install libfranka
-   # then install official python wrapper 
-   cd pylibfranka
-   pip install .
-   ```
 
-2. Install `aiofranka` 
-    ```bash
-    pip install aiofranka
-    ```
+```bash
+pip install aiofranka
+```
 
-    Or for development:
-    ```bash
-    git clone https://github.com/Improbable-AI/aiofranka.git
-    cd aiofranka
-    pip install -e .
-    ```
+Or for development:
+```bash
+git clone https://github.com/Improbable-AI/aiofranka.git
+cd aiofranka
+pip install -e .
+```
 
 ## Quick Start
 
