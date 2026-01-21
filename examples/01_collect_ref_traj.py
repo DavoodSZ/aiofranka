@@ -24,8 +24,9 @@ async def main():
 
     base = np.array([1, 1, 1, 1, 0.6, 0.6, 0.6])
 
-    kps = [ 16, 128, 512 ]
-    kds = [ 2,   8,   32  ]
+    # kps = [ 16, 32, 64, 128, 256, 512 ]
+    kps = [ 160 ]
+    kds = [ 1, 2, 4, 8, 12, 16, 24 ]
 
     kp_kd_pairs = [ (kp, kd) for kp in kps for kd in kds ]
 
@@ -75,8 +76,8 @@ async def main():
         for key in logs.keys():
             logs[key] = np.stack(logs[key])
         
-        os.makedirs("./examples/sysid_left/", exist_ok=True)
-        np.savez(f"./examples/sysid_left/sysid_K{int(kp)}_D{int(kd)}.npz", **logs)
+        os.makedirs("./examples/sysid_left_more/", exist_ok=True)
+        np.savez(f"./examples/sysid_left_more/sysid_K{int(kp)}_D{int(kd)}.npz", **logs)
         
 if __name__ == "__main__":
     asyncio.run(main())

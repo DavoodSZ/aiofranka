@@ -13,6 +13,7 @@ from cmaes import CMA
 import json
 # make the plots into mp4
 import imageio
+import time
 
 # add argparse arguments
 parser = argparse.ArgumentParser(
@@ -248,7 +249,7 @@ class NewRobotsSceneCfg(InteractiveSceneCfg):
 
 
 
-def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
+def run_simulator(name, sim: sim_utils.SimulationContext, scene: InteractiveScene):
     sim_dt = sim.get_physics_dt()
     print(sim_dt)
     sim_time = 0.0
@@ -259,11 +260,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     lower = np.array([-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0519])
     upper = np.array([+2.7437, +1.7837, +2.9007, +0.1518, +2.8065, +4.5169, +3.0519])
 
-    name = args_cli.name
+    # name = args_cli.name
 
-    os.makedirs(f"same_frequency_results/{name}", exist_ok=True)
+    os.makedirs(f"final_grid/{name}", exist_ok=True)
 
-    real_data = np.load(f"examples/sysid_left_new/sysid_{name}.npz")
+    real_data = np.load(f"examples/sysid_left_more/sysid_{name}.npz")
     # print(real_+d)
     real_data = {k: v for k, v in real_data.items()}
     print(real_data.keys())
@@ -302,7 +303,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # randomly sample from the bounds for initial guess
     init_guess = np.random.uniform(bounds[:, 0], bounds[:, 1])
 
-    print(bounds)
+    # print(bounds)
 
     optimizer = CMA(mean = init_guess, sigma = 3.0, \
         bounds = bounds,
@@ -318,25 +319,24 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # specify the seed used for random initialization
     rand_run_int = 42
 
+    from tqdm import trange as original_trange
 
-    for iii in range(200):
+    pbar = original_trange(200, desc="Optimization", unit=" iter")
 
-        print("================================================")
-        print(f"Iteration {iii}")
-        print("================================================")
+    for iii in pbar:
 
-
+        iter_start = time.time()
 
         # try randomized pd gains
+        t_ask = time.time()
         pd_gains = []
-        for j in trange(args_cli.num_envs):
+        for j in range(args_cli.num_envs):
             pd_gain  = optimizer.ask()
             pd_gains.append(pd_gain)
         pd_gains = np.stack(pd_gains, axis = 0)
+        t_ask = time.time() - t_ask
 
-        print("writing joint armature and friction coefficient")
-
-
+        t_write = time.time()
         # write the joint armature, friction coefficient, dynamic friction coefficient, and viscous friction coefficient to the simulator
         scene["Franka"].write_joint_stiffness_to_sim(torch.from_numpy(2 ** pd_gains[:, 0:joint_num  ]).to(args_cli.device).type(torch.float32), \
             joint_ids = torch.tensor([i for i in range(joint_num)]).type(torch.int).to(args_cli.device))
@@ -352,8 +352,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
         scene["Franka"].write_joint_friction_coefficient_to_sim(static_friction, dynamic_friction, viscous_friction, \
                                                                 joint_ids = torch.tensor([i for i in range(joint_num)]).type(torch.int).to(args_cli.device))
-        
-
+        t_write = time.time() - t_write
 
         costs = np.zeros(args_cli.num_envs)
 
@@ -375,7 +374,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
         # get the joint position from the real data
         # reset.
-        for count in trange(real_data["qpos"].shape[0]):
+        t_sim = time.time()
+        for count in range(real_data["qpos"].shape[0]):
 
             # wave
             wave_action = torch.zeros(args_cli.num_envs, 9)
@@ -401,6 +401,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             joint_velocities.append(scene["Franka"].data.joint_vel.clone().cpu().squeeze().numpy())
 
             joint_targets.append(wave_action.clone().cpu().squeeze().numpy())
+        t_sim = time.time() - t_sim
 
         joint_positions = np.stack(joint_positions, axis = 1)[..., :joint_num]
         joint_velocities = np.stack(joint_velocities, axis = 1)[..., :joint_num]
@@ -409,12 +410,49 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         real_joint_positions = real_data["qpos"][:, :joint_num]
         real_joint_velocities = real_data["qvel"][:, :joint_num]
 
+        # Normalize by min/max of actual response curves
+        pos_min = real_joint_positions.min(axis=0, keepdims=True)
+        pos_max = real_joint_positions.max(axis=0, keepdims=True)
+        pos_range = pos_max - pos_min
+        pos_range = np.where(pos_range < 1e-6, 1.0, pos_range)  # avoid division by zero
+        
+        vel_min = real_joint_velocities.min(axis=0, keepdims=True)
+        vel_max = real_joint_velocities.max(axis=0, keepdims=True)
+        vel_range = vel_max - vel_min
+        vel_range = np.where(vel_range < 1e-6, 1.0, vel_range)  # avoid division by zero
+        
+        normalized_real_pos = (real_joint_positions - pos_min) / pos_range
+        normalized_real_vel = (real_joint_velocities - vel_min) / vel_range
 
-        # compute the cost
-        # cost = np.abs(error).mean(-1).mean(-1).astype(np.float64)
-        cost = [spectral_mse(joint_positions[i], real_joint_positions) + spectral_mse(joint_velocities[i], real_joint_velocities) for i in range(args_cli.num_envs)]
-        # cost = np.array([ np.linalg.norm (joint_positions[i] - real_joint_positions) + np.linalg.norm (joint_velocities[i] - real_joint_velocities) * 1.0 for i in range(args_cli.num_envs) ])
+        # Compute all 4 metrics for each environment
+        t_loss = time.time()
+        mse_pos_losses = []
+        mse_vel_losses = []
+        spectral_pos_losses = []
+        spectral_vel_losses = []
+        
+        for i in range(args_cli.num_envs):
+            # Normalize simulated data using same normalization as real data
+            normalized_sim_pos = (joint_positions[i] - pos_min) / pos_range
+            normalized_sim_vel = (joint_velocities[i] - vel_min) / vel_range
+            
+            # MSE losses
+            mse_pos = np.mean((normalized_sim_pos - normalized_real_pos)**2)
+            mse_vel = np.mean((normalized_sim_vel - normalized_real_vel)**2)
+            
+            # Spectral MSE losses
+            spectral_pos = spectral_mse(normalized_sim_pos, normalized_real_pos)
+            spectral_vel = spectral_mse(normalized_sim_vel, normalized_real_vel)
+            
+            mse_pos_losses.append(mse_pos)
+            mse_vel_losses.append(mse_vel)
+            spectral_pos_losses.append(spectral_pos)
+            spectral_vel_losses.append(spectral_vel)
+
+        # compute the cost (combined)
+        cost = [spectral_pos_losses[i] + spectral_vel_losses[i] for i in range(args_cli.num_envs)]
         costs += cost
+        t_loss = time.time() - t_loss
 
 
         argidx = np.argmin(costs)
@@ -424,7 +462,9 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         for i in range(args_cli.num_envs):
             pd_gains_cost.append((pd_gains[i], costs[i]))
 
+        t_opt = time.time()
         optimizer.tell(pd_gains_cost)
+        t_opt = time.time() - t_opt
 
 
 
@@ -457,6 +497,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         dynamic_friction = pd_gains[argidx, 3*joint_num:4*joint_num] * pd_gains[argidx, 4*joint_num:5*joint_num]
         viscous_friction = pd_gains[argidx, 5*joint_num:6*joint_num]
 
+        t_plot = time.time()
+
         info = {
             "p_gain": p_gain.tolist(),
             "d_gain": d_gain.tolist(),
@@ -466,19 +508,19 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             "viscous_friction": viscous_friction.tolist(),
             "body_mass": pd_gains[argidx, 6*joint_num:6*joint_num + 1*body_num].tolist(),
             "body_inertia": pd_gains[argidx, 6*joint_num + 1*body_num:6*joint_num + 1*body_num + 6 * body_num].tolist(),
-            "cost": min_cost
+            "cost": min_cost,
+            "mse_pos": mse_pos_losses[argidx],
+            "mse_vel": mse_vel_losses[argidx],
+            "spectral_mse_pos": spectral_pos_losses[argidx],
+            "spectral_mse_vel": spectral_vel_losses[argidx]
         }
         # save as json (pretty print)
 
         if min_cost < lowest_loss:
             lowest_loss = min_cost
-            with open(f"same_frequency_results/{name}/best_seed{rand_run_int}.json", "w") as f:
+            with open(f"final_grid/{name}/best_seed{rand_run_int}.json", "w") as f:
                 json.dump(info, f, indent=4)
 
-
-
-        print("================================================")
-        print(f"Min cost: {min_cost}")
         min_pd_gain = pd_gains_cost[argidx][0]
         actual_p_gains = []
         for i in range(joint_num):
@@ -486,32 +528,31 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         actual_d_gains = []
         for i in range(joint_num):
             actual_d_gains.append(2**(min_pd_gain[i+joint_num]))
-        print(f"Actual P gains: {actual_p_gains}")
-        print(f"Actual D gains: {actual_d_gains}")
-        print(f"Actual armature: {pd_gains[argidx, 2*joint_num:3*joint_num]}")
-        print(f"Actual friction coefficient: {pd_gains[argidx, 3*joint_num:4*joint_num]}")
-        print(f"Actual dynamic friction coefficient: {pd_gains[argidx, 3*joint_num:4*joint_num] * pd_gains[argidx, 4*joint_num:5*joint_num]}")
-        print(f"Actual viscous friction coefficient: {pd_gains[argidx, 5*joint_num:6*joint_num]}")
-        print(f"Actual body mass: {pd_gains[argidx, 6*joint_num:6*joint_num + 1*body_num]}")
-        print(f"Actual body inertia: {pd_gains[argidx, 6*joint_num + 1*body_num:6*joint_num + 1*body_num + 6 * body_num]}")
-        print("================================================")
+
+        # Only plot at the last iteration
+        if iii == 199:
+            plot = draw_real_plot(name, min_cost, iii, sjps[argidx], jts[argidx], rjps, \
+                    actual_p_gains, actual_d_gains, \
+                    pd_gains[argidx, 2*joint_num:3*joint_num], \
+                    pd_gains[argidx, 3*joint_num:4*joint_num], \
+                    pd_gains[argidx, 4*joint_num:5*joint_num], \
+                    pd_gains[argidx, 5*joint_num:6*joint_num], joint_num)
+
+            # update the mean and sigma
+            plots.append(plot)
+
+            imageio.mimsave(f'final_grid/{name}/plots.mp4', plots, fps=10)
+        
+        t_plot = time.time() - t_plot
+        
+        iter_time = time.time() - iter_start
+        
+        # Update tqdm description with timing and loss info
+        from tqdm import tqdm as tqdm_main
+        desc = f"{name} | MSE Pos: {mse_pos_losses[argidx]:.5f} | MSE Vel: {mse_vel_losses[argidx]:.5f} | Spectral Pos: {spectral_pos_losses[argidx]:.5f} | Spectral Vel: {spectral_vel_losses[argidx]:.5f} | Loss: {min_cost:.5f}"
+        pbar.set_description(desc)
 
 
-        plot = draw_real_plot(name, min_cost, iii, sjps[argidx], jts[argidx], rjps, \
-                actual_p_gains, actual_d_gains, \
-                pd_gains[argidx, 2*joint_num:3*joint_num], \
-                pd_gains[argidx, 3*joint_num:4*joint_num], \
-                pd_gains[argidx, 4*joint_num:5*joint_num], \
-                pd_gains[argidx, 5*joint_num:6*joint_num], joint_num)
-
-        # update the mean and sigma
-        plots.append(plot)
-
-        imageio.mimsave(f'same_frequency_results/{name}/plots.mp4', plots, fps=10)
-
-
-    # raise exception and kill the script 
-    raise Exception("Finished all iterations")
 
 def spectral_mse(x, y):
     """
@@ -563,7 +604,7 @@ def draw_real_plot(name, cost, generation, joint_positions, joint_targets, real_
     plt.figtext(0.5, 0.06, viscous_friction_txt, ha='center', fontsize=12)
     plt.legend()
     axs[0].set_title(f"Generation {generation} | Cost: {cost:.5f}")
-    plt.savefig(f"same_frequency_results/{name}/plot.png", dpi=300, bbox_inches='tight', pad_inches=0.1)
+    plt.savefig(f"final_grid/{name}/plot.png", dpi=300, bbox_inches='tight', pad_inches=0.1)
 
     # tight layout
     plt.tight_layout()
@@ -589,7 +630,16 @@ def main():
     # Now we are ready!
     print("[INFO]: Setup complete...")
     # Run the simulator
-    run_simulator(sim, scene)
+
+    # kps = [ 16, 32, 64, 128, 256, 512 ]
+    kps = [ 16, 32, 64, 128, 160, 256, 512 ]
+    kds = [ 1, 2, 4, 8, 12, 16, 24 ]
+
+    for kp in kps:
+        for kd in kds:
+            name = f"K{kp}_D{kd}"
+
+            run_simulator(name, sim, scene)
 
 
 if __name__ == "__main__":

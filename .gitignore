@@ -23,3 +23,16 @@ vel_results.zip
 # docs/_sources/
 # docs/api/
 # !docs/source/
+more_grid_heatmap.pdf
+more_grid_heatmap.png
+more_grid_sysid.zip
+
+*.npz
+final_grid/
+more_grid/
+same_frequency_results/
+vel_results_new/
+plot_heatmap.py
+sysid_script.sh
+test_K128_D8.png
+test.png
