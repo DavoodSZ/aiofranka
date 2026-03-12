@@ -301,32 +301,93 @@ def cmd_gravcomp(args):
             raise
 
         print(f"\n  {GREEN}Running{RST} {DIM}— robot is in gravity compensation mode{RST}")
-        print(f"  {DIM}You can freely move the robot by hand. Press Ctrl+C to stop and lock.{RST}\n")
+        print(f"  {DIM}You can freely move the robot by hand. Press Ctrl+C to stop.{RST}\n")
 
         # Run the control loop (blocks until Ctrl+C)
         run_gravcomp_loop(robot_ip, damping=damping)
 
-        # Teardown
-        shutdown_total = 3
+        # Teardown — leave robot unlocked with FCI active, just release token
         print()  # blank line after ^C
         try:
-            _cli_run_with_spinner("Deactivating FCI", 1, shutdown_total,
-                                  client.deactivate_fci)
-        except Exception:
-            pass
-        try:
-            _cli_run_with_spinner("Locking joints", 2, shutdown_total,
-                                  client.lock)
-        except Exception:
-            pass
-        try:
-            _cli_run_with_spinner("Releasing control token", 3, shutdown_total,
+            _cli_run_with_spinner("Releasing control token", 1, 1,
                                   client.release_token)
             _clear_token(robot_ip)
         except Exception:
             pass
 
-        print(f"\n  {GREEN}Locked{RST}\n")
+        print(f"\n  {GREEN}Stopped{RST} {DIM}(joints left unlocked, FCI active — use {RST}{BOLD}aiofranka lock{RST}{DIM} to lock){RST}\n")
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"\n  {RED}Error:{RST} {e}\n")
+
+
+def cmd_home(args):
+    from aiofranka.server import (
+        _DeskClientV2, _load_token_state, _save_token_state, _clear_token,
+        run_home_move,
+    )
+
+    robot_ip = _resolve_ip(args.ip)
+    protocol = args.protocol
+    username, password = _resolve_credentials(args)
+
+    print(f"\n  {BOLD}aiofranka{RST} {DIM}|{RST} home {DIM}({robot_ip}){RST}\n")
+
+    setup_total = 4
+    try:
+        client = _DeskClientV2(robot_ip, username, password, protocol=protocol)
+
+        saved_token, saved_token_id = _load_token_state(robot_ip)
+        if saved_token is not None:
+            client._token = saved_token
+            client._token_id = saved_token_id
+            if not client.validate_token():
+                client._token = None
+                client._token_id = None
+
+        if client._token is None:
+            _cli_run_with_spinner("Acquiring control token", 1, setup_total,
+                                  client.take_token, timeout=15)
+        else:
+            print(_cli_step_line(1, setup_total, "Acquiring control token",
+                                 f"{GREEN}done{RST} {DIM}(reused){RST}"))
+
+        try:
+            _cli_run_with_spinner("Recovering safety errors", 2, setup_total,
+                                  client.recover_errors)
+
+            if client.are_joints_unlocked():
+                print(_cli_step_line(3, setup_total, "Unlocking joints",
+                                     f"{GREEN}done{RST} {DIM}(already){RST}"))
+            else:
+                _cli_run_with_spinner("Unlocking joints", 3, setup_total,
+                                      client.unlock)
+
+            if client.is_fci_active():
+                print(_cli_step_line(4, setup_total, "Activating FCI",
+                                     f"{GREEN}done{RST} {DIM}(already){RST}"))
+            else:
+                _cli_run_with_spinner("Activating FCI", 4, setup_total,
+                                      client.activate_fci)
+
+            _save_token_state(robot_ip, client._token, client._token_id)
+        except Exception:
+            client.release_token()
+            _clear_token(robot_ip)
+            raise
+
+        print()
+        run_home_move(robot_ip)
+
+        try:
+            _cli_run_with_spinner("Releasing control token", 1, 1,
+                                  client.release_token)
+            _clear_token(robot_ip)
+        except Exception:
+            pass
+
+        print(f"\n  {GREEN}Done{RST} {DIM}(joints left unlocked, FCI active — use {RST}{BOLD}aiofranka lock{RST}{DIM} to lock){RST}\n")
     except KeyboardInterrupt:
         pass
     except Exception as e:
@@ -1398,6 +1459,13 @@ def main():
     p_gravcomp.add_argument("--damping", type=float, default=0.0,
                             help="Joint velocity damping (kd) per joint (default: 0)")
 
+    # home
+    p_home = subparsers.add_parser("home", help="Move robot to home position")
+    p_home.add_argument("--ip", type=str, default=None, help="Robot IP")
+    p_home.add_argument("--username", type=str, default="admin", help="Robot web UI username")
+    p_home.add_argument("--password", type=str, default="admin", help="Robot web UI password")
+    p_home.add_argument("--protocol", type=str, default="https", choices=["http", "https"])
+
     # stop
     p_stop = subparsers.add_parser("stop", help="Stop the control server")
     p_stop.add_argument("--ip", type=str, default=None, help="Robot IP")
@@ -1467,6 +1535,8 @@ def main():
         cmd_start(args)
     elif args.command == "gravcomp":
         cmd_gravcomp(args)
+    elif args.command == "home":
+        cmd_home(args)
     elif args.command == "stop":
         cmd_stop(args)
     elif args.command == "status":

@@ -1404,6 +1404,36 @@ def run_gravcomp_loop(robot_ip: str, damping: float = 0.0):
     asyncio.run(_run_gravcomp_loop(robot_ip, damping=damping))
 
 
+_HOME_QPOS = [0, 0, 0.0, -1.57079, 0, 1.57079, -0.7853]
+
+
+async def _run_home_move(robot_ip: str):
+    """Move robot to home position. Assumes robot is already unlocked with FCI active."""
+    from aiofranka.controller import FrankaController
+
+    robot = RobotInterface(robot_ip)
+    controller = FrankaController(robot)
+
+    base = np.array([1, 1, 1, 1, 0.6, 0.6, 0.6])
+    controller.kp = base * 80
+    controller.kd = base * 4
+    controller.ki = np.zeros(7)
+
+    await controller.start()
+    await controller.move(_HOME_QPOS)
+
+    controller.running = False
+    try:
+        robot.stop()
+    except Exception:
+        pass
+
+
+def run_home_move(robot_ip: str):
+    """Move robot to home position (blocks until done)."""
+    asyncio.run(_run_home_move(robot_ip))
+
+
 # ── Config helpers (shared with CLI) ───────────────────────────────────────
 
 _CONFIG_DIR = os.path.expanduser("~/.aiofranka")
