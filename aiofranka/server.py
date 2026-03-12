@@ -1191,8 +1191,11 @@ async def _run_server(robot_ip: str, unlock: bool = True,
         else:
             _write_progress(robot_ip, 1, 1, "Stopping 1kHz control loop")
 
-        # Cleanup
-        _clear_token(robot_ip)
+        # Only clear the saved token if we owned it (lock_client was set).
+        # When unlock=False (e.g. start_subprocess), we don't own the token —
+        # clearing it would prevent the parent from restarting.
+        if lock_client is not None:
+            _clear_token(robot_ip)
         shm.write_status(STATUS_STOPPED)
         shm.close()
         shm.unlink()
@@ -1302,6 +1305,10 @@ def start_subprocess(ip: str, *,
             os.unlink(pid_path)
 
     def _target():
+        # Own process group so Ctrl+C (SIGINT) from the terminal never
+        # reaches us — _run_server re-registers SIGINT via asyncio, so
+        # SIG_IGN alone isn't enough.  Parent sends SIGTERM for clean shutdown.
+        os.setpgrp()
         # Auto-terminate when parent dies (Linux)
         try:
             import ctypes

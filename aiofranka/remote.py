@@ -131,8 +131,11 @@ class FrankaRemoteController:
                 print(f"    {_BOLD}$ aiofranka unlock{_RST}\n")
             raise
 
-        # Register cleanup so the subprocess dies when the script exits
-        atexit.register(self._terminate_server)
+        # Register cleanup so the subprocess dies when the script exits.
+        # Use stop() instead of _terminate_server() to send a graceful ZMQ
+        # stop command before SIGTERM, giving the control loop time to exit
+        # cleanly (avoids communication_constraints_violation reflex).
+        atexit.register(self.stop)
 
         # Connect to the now-running server
         self._shm = StateBlock(self.robot_ip, create=False, track=False)
