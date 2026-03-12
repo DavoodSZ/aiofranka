@@ -22,19 +22,28 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "pylibfranka", 
+    "pylibfranka",
     "ruckig",
     "numpy",
     "scipy",
     "mujoco",
-    "tqdm", 
+    "tqdm",
     "requests",
+    "pyzmq",
+    "msgpack",
 ]
+
+[project.scripts]
+aiofranka = "aiofranka.__main__:main"
 
 [project.optional-dependencies]
 docs = [
     "sphinx>=7.0.0",
     "sphinx-rtd-theme>=2.0.0",
+]
+robotiq = [
+    "minimalmodbus",
+    "pyrobotiqgripper",
 ]
 
 [project.urls]

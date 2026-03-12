@@ -15,7 +15,8 @@ class Mock(MagicMock):
     def __getattr__(cls, name):
         return MagicMock()
 
-MOCK_MODULES = ['mujoco', 'mujoco.viewer', 'pylibfranka', 'ruckig']
+MOCK_MODULES = ['mujoco', 'mujoco.viewer', 'pylibfranka', 'ruckig',
+                 'zmq', 'msgpack', 'pyrobotiqgripper', 'minimalmodbus']
 sys.modules.update((mod_name, Mock()) for mod_name in MOCK_MODULES)
 
 # -- Project information -----------------------------------------------------
@@ -24,7 +25,7 @@ sys.modules.update((mod_name, Mock()) for mod_name in MOCK_MODULES)
 project = 'aiofranka'
 copyright = '2025, MIT Improbable AI Lab'
 author = 'MIT Improbable AI Lab'
-release = '0.1.0'
+release = '0.2.0'
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration

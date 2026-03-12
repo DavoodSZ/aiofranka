@@ -1,144 +1,196 @@
 Quick Start
 ===========
 
-This guide will get you controlling a Franka robot in minutes.
+This guide will get you controlling a Franka robot in minutes. There are two ways to use aiofranka:
 
-Basic Example
--------------
+- **Server mode** — sync Python API, 1kHz loop in a subprocess
+- **Async mode** — everything in a single process using ``asyncio``
 
-Here's a minimal example that demonstrates the core functionality:
+Server Mode
+-------------------------
+
+Server mode runs the 1kHz control loop in a subprocess. Your scripts use a plain synchronous API — no ``async``/``await`` needed.
+
+- **No async/await** — plain Python scripts, easy to integrate with existing codebases
+- **Process-isolated** — heavy computation (policy inference, camera processing) can't starve the 1kHz loop
+- **Automatic lifecycle** — server subprocess starts with your script and stops when it exits
 
 .. code-block:: python
 
-   import asyncio 
-   import numpy as np 
+   import numpy as np
+   import aiofranka
+   from aiofranka import FrankaRemoteController
+
+   # 1. Unlock the robot (opens brakes + activates FCI)
+   aiofranka.unlock()
+
+   # 2. Create controller and start server subprocess
+   controller = FrankaRemoteController()
+   controller.start()
+
+   # 3. Move to home position
+   controller.move([0, 0, 0.0, -1.57079, 0, 1.57079, -0.7853])
+
+   # 4. Switch to impedance control
+   controller.switch("impedance")
+   controller.kp = np.ones(7) * 80.0
+   controller.kd = np.ones(7) * 4.0
+   controller.set_freq(50)
+
+   # 5. Execute sinusoidal motion
+   for cnt in range(100):
+       state = controller.state
+       delta = np.sin(cnt / 50.0 * np.pi) * 0.1
+       controller.set("q_desired", delta + controller.initial_qpos)
+
+   # 6. Stop server and lock robot
+   controller.stop()
+   aiofranka.lock()
+
+The server subprocess terminates automatically when your script exits (Ctrl+C, crash, etc.).
+``controller.start()`` checks that the robot is unlocked and FCI is active before launching — if not, it prints a status summary and exits cleanly.
+
+Async Mode
+----------
+
+Async mode runs the 1kHz control loop in-process using asyncio — everything in a single script.
+
+- **Single script** — no separate server process, simpler deployment
+- **Direct access** — no IPC overhead, full control over the event loop
+- **Requires async discipline** — any blocking call >1ms after ``controller.start()`` will cause ``communication_constraints_violation`` (see :doc:`async_mode`)
+
+.. code-block:: python
+
+   import asyncio
+   import numpy as np
    from aiofranka import RobotInterface, FrankaController
 
    async def main():
-       # Connect to robot (use IP for real robot, None for simulation)
-       robot = RobotInterface("172.16.0.2") 
+       robot = RobotInterface("172.16.0.2")
        controller = FrankaController(robot)
-       
-       # Start the 1kHz control loop
+
        await controller.start()
+       await controller.move([0, 0, 0.0, -1.57079, 0, 1.57079, -0.7853])
 
-       try:
-           # Test connection quality
-           await controller.test_connection()
+       controller.switch("impedance")
+       controller.kp = np.ones(7) * 80.0
+       controller.kd = np.ones(7) * 4.0
+       controller.set_freq(50)
 
-           # Move to home position with smooth trajectory
-           await controller.move([0, 0, 0.0, -1.57079, 0, 1.57079, -0.7853])
+       for cnt in range(100):
+           delta = np.sin(cnt / 50.0 * np.pi) * 0.1
+           init = controller.initial_qpos
+           await controller.set("q_desired", delta + init)
 
-           # Switch to impedance control
-           controller.switch("impedance")
-           controller.kp = np.ones(7) * 80.0
-           controller.kd = np.ones(7) * 4.0
-           controller.set_freq(50)  # 50Hz update rate
-           
-           # Execute sinusoidal motion
-           for cnt in range(100): 
-               delta = np.sin(cnt / 50.0 * np.pi) * 0.1
-               init = controller.initial_qpos
-               await controller.set("q_desired", delta + init)
-
-       finally:
-           # Always stop gracefully
-           await controller.stop()
+       await controller.stop()
 
    if __name__ == "__main__":
        asyncio.run(main())
 
-Understanding the Code
-----------------------
+Server Mode vs Async Mode
+--------------------------
 
-Let's break down what each part does:
+.. list-table::
+   :header-rows: 1
+   :widths: 25 35 35
 
-1. **Create Robot Interface**
+   * -
+     - Server mode
+     - Async mode
+   * - **Class**
+     - ``FrankaRemoteController``
+     - ``FrankaController``
+   * - **API style**
+     - Synchronous (plain Python)
+     - ``async``/``await``
+   * - **1kHz loop runs in**
+     - Subprocess (auto-managed)
+     - Your process (asyncio task)
+   * - **Blocking calls OK?**
+     - Yes — can't starve the loop
+     - No — must stay under ~1ms
+   * - **State reads**
+     - Shared memory (zero-copy)
+     - Direct attribute access
+   * - **Commands**
+     - ZMQ IPC (msgpack)
+     - Direct method calls
+   * - **Setup**
+     - ``unlock()`` + ``ctrl.start()``
+     - Single script
+   * - **Best for**
+     - Heavy workloads (GPU inference, vision pipelines)
+     - Lightweight scripts, rapid prototyping
 
-   .. code-block:: python
+Unlocking and Locking
+---------------------
 
-      robot = RobotInterface("172.16.0.2")  # Real robot
-      # robot = RobotInterface(None)        # Simulation
+Before using the robot, joints must be unlocked and FCI (Franka Control Interface) must be activated.
 
-   The IP address connects to your real robot. Use ``None`` for simulation mode.
+**From Python:**
 
-2. **Create Controller**
+.. code-block:: python
 
-   .. code-block:: python
+   import aiofranka
 
-      controller = FrankaController(robot)
+   aiofranka.unlock()   # opens brakes + activates FCI
+   # ... run your control script ...
+   aiofranka.lock()     # closes brakes + deactivates FCI
 
-   The controller manages the 1kHz control loop and provides high-level commands.
+**From the CLI:**
 
-3. **Start Control Loop**
+.. code-block:: bash
 
-   .. code-block:: python
+   aiofranka unlock
+   # ... run your script ...
+   aiofranka lock
 
-      await controller.start()
+Credentials are prompted on first use and saved to ``~/.aiofranka/config.json``.
 
-   This starts the background control loop at 1kHz. Must be awaited!
+Reading Robot State
+-------------------
 
-4. **Test Connection**
+Robot state is continuously updated at 1kHz and accessible via ``controller.state``:
 
-   .. code-block:: python
+.. code-block:: python
 
-      await controller.test_connection()
+   state = controller.state
 
-   Runs for 5 seconds and prints timing statistics. Useful for diagnosing issues.
+   print(f"Joint positions: {state['qpos']}")        # (7,) [rad]
+   print(f"Joint velocities: {state['qvel']}")       # (7,) [rad/s]
+   print(f"End-effector pose:\n{state['ee']}")       # (4, 4) homogeneous transform
+   print(f"Jacobian:\n{state['jac']}")               # (6, 7)
+   print(f"Mass matrix:\n{state['mm']}")             # (7, 7)
+   print(f"Last torques: {state['last_torque']}")    # (7,) [Nm]
 
-5. **Move with Trajectory**
+Additional state available on the controller:
 
-   .. code-block:: python
+.. code-block:: python
 
-      await controller.move([0, 0, 0, -1.57, 0, 1.57, -0.785])
+   controller.initial_qpos   # (7,) joint positions at last switch()
+   controller.initial_ee     # (4, 4) EE pose at last switch()
+   controller.q_desired      # (7,) current desired joint positions
+   controller.ee_desired     # (4, 4) current desired EE pose
 
-   Generates and executes a smooth, jerk-limited trajectory to the target position.
+Rate Limiting
+-------------
 
-6. **Switch Controller Mode**
+Use ``set_freq()`` to enforce strict timing for command updates:
 
-   .. code-block:: python
+.. code-block:: python
 
-      controller.switch("impedance")
+   controller.set_freq(50)  # Set 50Hz update rate
 
-   Switches between impedance, OSC, and torque control modes at runtime.
+   # Automatically sleeps to maintain 50Hz timing
+   for i in range(100):
+       controller.set("q_desired", compute_target())
 
-7. **Set Gains**
-
-   .. code-block:: python
-
-      controller.kp = np.ones(7) * 80.0  # Stiffness
-      controller.kd = np.ones(7) * 4.0   # Damping
-
-   Configure controller gains for desired behavior.
-
-8. **Set Update Frequency**
-
-   .. code-block:: python
-
-      controller.set_freq(50)  # 50 Hz
-
-   Enforces timing for subsequent ``set()`` calls.
-
-9. **Send Commands**
-
-   .. code-block:: python
-
-      await controller.set("q_desired", target)
-
-   Rate-limited setter that automatically maintains the specified frequency.
-
-10. **Stop Controller**
-
-    .. code-block:: python
-
-       await controller.stop()
-
-    Gracefully stops the control loop and robot. Always use in a ``finally`` block!
+Each ``set()`` call sleeps for the remainder of the period, so the loop maintains consistent timing even if your computation time varies.
 
 Simulation Mode
 ---------------
 
-Test your code without hardware:
+Test your code without hardware (async mode only):
 
 .. code-block:: python
 
@@ -146,71 +198,21 @@ Test your code without hardware:
    from aiofranka import RobotInterface, FrankaController
 
    async def test_in_simulation():
-       # None = simulation mode
-       robot = RobotInterface(None)
+       robot = RobotInterface(None)  # None = simulation mode
        controller = FrankaController(robot)
-       
+
        await controller.start()
-       
-       # Same code works in simulation!
        await controller.move()
-       
        await controller.stop()
 
    asyncio.run(test_in_simulation())
 
 The MuJoCo viewer will open automatically, showing the robot motion.
 
-Reading Robot State
--------------------
+Next Steps
+----------
 
-Access current robot state at any time:
-
-.. code-block:: python
-
-   state = controller.state
-
-   print(f"Joint positions: {state['qpos']}")      # [rad]
-   print(f"Joint velocities: {state['qvel']}")     # [rad/s]
-   print(f"End-effector pose:\n{state['ee']}")     # 4x4 transform
-   print(f"Jacobian:\n{state['jac']}")             # (6, 7)
-   print(f"Mass matrix:\n{state['mm']}")           # (7, 7)
-   print(f"Last torques: {state['last_torque']}")  # [Nm]
-
-Controller Modes
-----------------
-
-aiofranka supports three control modes:
-
-Impedance Control (Joint Space)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: python
-
-   controller.switch("impedance")
-   controller.kp = np.ones(7) * 80.0
-   controller.kd = np.ones(7) * 4.0
-   controller.set_freq(50)
-
-   for i in range(100):
-       target = compute_target(i)
-       await controller.set("q_desired", target)
-
-**Best for**: Joint-space trajectories, compliant behavior
-
-Operational Space Control (Task Space)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: python
-
-   controller.switch("osc")
-   controller.ee_kp = np.array([300, 300, 300, 1000, 1000, 1000])
-   controller.ee_kd = np.ones(6) * 10.0
-   controller.set_freq(50)
-
-   desired_ee = np.eye(4)
-   desired_ee[:3, 3] = [0.5, 0.0, 0.4]  # Position [x, y, z]
-   await controller.set("ee_desired", desired_ee)
-
-**Best for**: Cartesian motions, end-effector tracking
-
+- :doc:`controllers` — detailed documentation for all control modes
+- :doc:`cli` — CLI reference for setup and diagnostics
+- :doc:`async_mode` — async discipline guide (for async mode users)
+- :doc:`examples` — complete working examples

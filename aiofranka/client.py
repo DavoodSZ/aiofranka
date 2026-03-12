@@ -214,12 +214,27 @@ class FrankaLockUnlock(FrankaClient):
         assert action.status_code == 200, "Error homing gripper."
         print(f'Successfully homed the gripper.')
 
-    def _lock_unlock(self, unlock: bool, force: bool = False):
+    def _lock_unlock(self, unlock: bool, force: bool = True):
+        action_name = "open" if unlock else "close"
         print(f'{"Unlocking" if unlock else "Locking"} the robot...')
-        action = self._session.post(urljoin(self._hostname, f'/desk/api/robot/{"open" if unlock else "close"}-brakes'), \
-                                    files={'force': force},
-                                    headers={'X-Control-Token': self._token})
-        assert action.status_code == 200, "Error requesting brake open/close action."
+        # Try FR3 endpoint first, fall back to Panda endpoint
+        fr3_endpoint = f'/desk/api/joints/{"unlock" if unlock else "lock"}'
+        panda_endpoint = f'/desk/api/robot/{action_name}-brakes'
+        headers = {'X-Control-Token': self._token}
+
+        action = self._session.post(
+            urljoin(self._hostname, fr3_endpoint),
+            headers=headers,
+        )
+        if action.status_code != 200:
+            # Fall back to Panda endpoint
+            action = self._session.post(
+                urljoin(self._hostname, panda_endpoint),
+                files={'force': str(force).lower()},
+                headers=headers,
+            )
+        assert action.status_code == 200, \
+            f"Error requesting brake {action_name} action (status {action.status_code}: {action.text})."
         print(f'Successfully {"unlocked" if unlock else "locked"} the robot.')
 
     def run(self, unlock: bool = False, force: bool = False, wait: bool = False, request: bool = False, persistent: bool = False, fci: bool = False, home: bool = False) -> None:

@@ -1,0 +1,4276 @@
+{
+  "info": {
+    "contact": {
+      "email": "info@franka.de",
+      "name": "Franka Robotics",
+      "url": "https://franka.de"
+    },
+    "description": "This API provides all the functionality needed to integrate, operate, monitor, and maintain a Franka robot system as part of a larger industrial solution.\n\n## First Start\nWhen the system boots for the first time, or after a factory reset, it enters first start mode and requires configuration before use. To check if the system is in this mode, use the [/api/system](#/System/getSystemState) endpoint and verify `status == \"FirstStart\"`. To configure the system, use the [/api/configuration/initial](#/Configuration/setInitialSystemConfiguration) endpoint.\n\n## Authentication\nFor authentication, the ['Basic' HTTP Authentication Scheme](https://datatracker.ietf.org/doc/html/rfc7617) is used: Clients must include an 'Authorization' header in each request to endpoints requiring authentication. The header must contain a Base64-encoded `<username>:<password>` string in the format: `Authorization: Basic <encoded_credentials>`.\n\n## Single Point of Control (SPoC)\nThe system provides single point of control functionality to comply with regulations. This means that only one user at a time can trigger critical actions, such as unlocking joints or executing robot motions. To call these actions, a control token must first be requested via [/api/system/control-token:take](#/SPoC/takeControlToken) and the returned token added as a header with key `\"X-Control-Token\"` to every request of endpoints that require SPoC. The control token is invalidated by a system reboot and needs to be requested anew.\n\n## Self Tests\nThe system needs to run self-tests periodically (at least every 24 hours of operation) to test the internal safety system. As self-tests require the robot to be idle, the user must manually execute them. During the execution of the self-tests, the robot arm will be power-cycled. Any joints that are unlocked before self-test execution will be locked for the duration of the self-tests and automatically unlocked afterward. The self-test status can be monitored via [/api/safety/self-tests](#/Safety/getSelfTestsState). It indicates when the self-tests are due or currently running.\n\n## Recovery of Safety Errors and Violations\nSeveral safety errors and violations must be resolved before the system can perform automatic motions again. The general resolution procedure is as follows (consider the special cases described below which require recovery motion(s)):\n\n1. Retrieve the next error that needs to be recovered via [/api/safety/recovery](#/Safety%20Recovery/getSafetyRecovery).\n\n1. Confirm the error via [/api/safety/recovery:confirm](#/Safety%20Recovery/confirmRecovery). The type must correspond to the type of the response received from the previous call.\n\n### Joint Limit Violation Recovery\nA joint limit violation indicates that one or several joints moved out of their permissible ranges. Automatic motions may physically damage the robot in this case. Hence, any such motion is prevented until the situation is rectified by recovering the joint limit violation as follows:\n\n1. Retrieve the joints that require recovery via [/api/safety/recovery](#/Safety%20Recovery/getSafetyRecovery).\n\n1. Start the recovery via [/api/safety/recovery:start](#/Safety%20Recovery/startRecovery). The type of the recovery to be started must be `JointLimitViolation`.\n\n1. Repeat the following procedure for **each** of the affected joints:\n\n   1. Press and hold the external enabling device (the device must not be released until the last step). This is a **manual** operation.\n\n   1. Move the joint to be recovered via [/api/safety/recovery/joint-motion:start](#/Safety%20Recovery/startSafetyRecoveryMotion) (recovery motion type should be `MoveOutOfJointLimit`) and [/api/safety/recovery/joint-motion:continue](#/Safety%20Recovery/continueSafetyRecoveryMotion) until the motion finishes successfully (indicated by response status code 204 in `/api/safety/recovery/joint-motion:continue`). **Warning**: Ensure the robot is free to move and observe it carefully during this motion.\n\n   1. Stop the joint motion via [/api/safety/recovery/joint-motion:stop](#/Safety%20Recovery/stopSafetyRecoveryMotion).\n\n   1. Release the external enabling device. This is a **manual** operation. Note that this step **must** be performed, even if the next step requires the device to be pressed again.\n\n1. Confirm the recovery of the joint limit violation via [/api/safety/recovery:confirm](#/Safety%20Recovery/confirmRecovery).The type of the recovery to be confirmed must be `JointLimitViolation`.\n\n### Joint Position Error Recovery\nA joint position error indicates that the control system has lost the safe position data of one or more joints. This can occur, for example, if there is a power outage while the brakes are open. In the event of a joint position error, the robot is not safe to move, and safety control prevents any automatic motion until the error is resolved by recovering the joint position error as follows:\n\n**Note**: Only users with the role of safety-operator may recover joint position errors.\n\n1. Retrieve the joints that require recovery via [/api/safety/recovery](#/Safety%20Recovery/getSafetyRecovery).\n\n1. Start the recovery via [/api/safety/recovery:start](#/Safety%20Recovery/startRecovery). The type of recovery to be started must be `JointPositionError`.\n\n1. Repeat the following procedure for **each** of the affected joints:\n\n   1. Check if the current robot configuration allows the joint to be freely moved to its reference position. If not, repeat the following steps for as many (other) joints as needed:\n\n      1. Press and hold the external enabling device (do not release the device until the last step). This is a **manual** operation.\n\n      1. Move the corresponding joint via [/api/safety/recovery/joint-motion:start](#/Safety%20Recovery/startSafetyRecoveryMotion) (recovery motion type should be `MovePositive` or `MoveNegative` depending on the direction in which the joint should be moved) and [/api/safety/recovery/joint-motion:continue](#/Safety%20Recovery/continueSafetyRecoveryMotion) as far as necessary. **Warning**: Ensure the robot is free to move and observe it carefully during this motion.\n\n      1. Stop the joint motion via [/api/safety/recovery/joint-motion:stop](#/Safety%20Recovery/stopSafetyRecoveryMotion).\n\n      1. Release the external enabling device. This is a **manual** operation. Note that this step **must** be performed, even if the next step requires the device to be pressed again.\n\n   1. Press and hold the external enabling device (do not release the device until the last step). This is a **manual** operation.\n\n   1. Move the joint to be recovered via [/api/safety/recovery/joint-motion:start](#/Safety%20Recovery/startSafetyRecoveryMotion) (recovery motion type should be `MoveToReferencePosition`) and [/api/safety/recovery/joint-motion:continue](#/Safety%20Recovery/continueSafetyRecoveryMotion) until the motion finishes successfully (indicated by response status code 204 in `/api/safety/recovery/joint-motion:continue`). **Warning**: Ensure the robot is free to move and observe it carefully during this motion.\n\n   1. Stop the joint motion via [/api/safety/recovery/joint-motion:stop](#/Safety%20Recovery/stopSafetyRecoveryMotion).\n\n   1. Release the external enabling device. This is a **manual** operation. Note that this step **must** be performed, even if the next step requires the device to be pressed again.\n\n   1. The safety operator **must** visually confirm that the recovered joint has reached its reference position. The joints' respective reference positions can be found in the product manual. If this is not the case (even though the previous joint motion was successfully finished), contact support.\n\n1. Confirm the recovery of the joint position error via [/api/safety/recovery:confirm](#/Safety%20Recovery/confirmRecovery). The type of recovery to be confirmed must be `JointPositionError`.\n\n### Recovery Motions\nIn order to ensure that the motions are closely monitored, both [/api/safety/recovery/joint-motion:start](#/Safety%20Recovery/startSafetyRecoveryMotion) and [/api/safety/recovery/joint-motion:continue](#/Safety%20Recovery/continueSafetyRecoveryMotion) return continuation tokens while the motion remains active. The server expects each token to be sent back within 500 ms of its issue via [/api/safety/recovery/joint-motion:continue](#/Safety%20Recovery/continueSafetyRecoveryMotion). Otherwise, the motion will be stopped by the server. Thus, taking possible network latency into account, to maintain an active motion, the client-side token handling logic must be non-blocking and must send each token back to the server as soon as it has been received.\n\n## Rescue System\nThe rescue system is a separate operating system that boots if the main system fails to start. In this mode, only a subset of functions are available, specifically all endpoints tagged with \"Rescue System\". All other endpoints return status code `503`. In rescue mode, no control token or authentication is required, even if stated otherwise in the endpoint description. Note that while you can modify configurations (such as network settings), all changes are temporary and are not persisted after a reboot. To check if the system is currently in rescue mode, use the [/api/system](#/System/getSystemState) endpoint and verify if `status == \"RescueSystem\"`.\n\n## Server Sent Events\nEndpoints with a `/sse` suffix conform to the [Server-Sent Events (SSE)](https://html.spec.whatwg.org/multipage/server-sent-events.html) protocol.These endpoints only emit `data` fields containing single-line JSON payloads. The `event`, `id`, and `retry` fields defined in the SSE specification are not utilized.\n\nSSE is a push-style notification mechanism, meaning the server initiates updates and streams them to the client over a persistent HTTP connection. Once the connection is established, the server can continuously send real-time updates without requiring repeated requests from the client.\n\nSince OpenAPI v3.0 does not natively support the SSE protocol, the response type is documented analogously to a GET request. The primary distinction is that the response content type is `text/event-stream`, and only the structure of the `data` payload is described by the schema field.\n\n## Errors\nAll error responses with the header `Content-Type: application/json` follow this format:\n```\n{\n  \"code\": string (unique error code for a specific failure case within an endpoint),\n  \"message\": string (optional, human-readable message intended for developers),\n  \"details\": any (optional, additional data providing context about the error; structure depends on the specific error code)\n}\n```\nThe following status codes are used universally:\n| Status Code | Description |\n|-------------|-------------|\n| __401__ | The endpoint requires authentication but the request was made without valid authentication credentials. The value of `code` is `\"Unauthorized\"`.|\n| __403__ | The endpoint requires certain user permissions but the request was made with insufficient permissions (e.g., a user who is not an admin attempted to change some system configurations). The value of `code` is `\"Forbidden\"`.|\n| __423__ | The endpoint requires SPoC but the request was made without the currently active control token. |\n| __500__ | An internal error occurred, please contact support. |\n| __503__ | The service is currently unavailable. Retrying the same request may succeed. If the system is in rescue mode, this status code is returned on all endpoints that are not available in this mode. |\n",
+    "license": {
+      "name": "Apache 2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0"
+    },
+    "title": "Desk API",
+    "version": "1.0"
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {
+    "/api/arm/motion:start": {
+      "post": {
+        "tags": [
+          "Robot Arm"
+        ],
+        "summary": "Initiates a given arm motion.",
+        "description": "**Warning**: The robot must be free to move and should be observed while the motion is active.\n\nStarts an arm motion and continues it until it is done.  This will also unlock the brakes if they are locked and will lock them afterwards if they were locked before. This requests blocks until the movement is finished. This will only work in Execution mode and the  Request must include a motion type.\n\nIf a work execution wait time > 0 is configured (via the Settings Franka-UI), then the motion is delayed correspondingly. Requires authentication.",
+        "operationId": "startArmMotion",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json;charset=utf-8": {
+              "schema": {
+                "$ref": "#/components/schemas/ArmMotion"
+              }
+            }
+          },
+          "description": "Arm motion to start"
+        },
+        "responses": {
+          "204": {
+            "description": "Motion finished successfully."
+          },
+          "400": {
+            "description": "Invalid `body` or `X-Control-Token`"
+          },
+          "409": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/MotionAborted"
+                }
+              }
+            },
+            "description": "Motion was aborted by other party."
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArmMotionFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow motion to be started. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Motion is currently not possible. Retrying may succeed."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/arm/motion:stop": {
+      "post": {
+        "tags": [
+          "Robot Arm"
+        ],
+        "summary": "Aborts an arm motion",
+        "description": "Stops the currently active arm motion immediately. Requires authentication.",
+        "operationId": "stopArmMotion",
+        "responses": {
+          "204": {
+            "description": "Motion aborted successfully."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/arm/joints": {
+      "get": {
+        "tags": [
+          "Robot Arm"
+        ],
+        "summary": "Get the state of all joints.",
+        "description": "Get the state of all joints.",
+        "operationId": "getJoints",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/JointStates"
+                }
+              }
+            },
+            "description": "Successfully got the joint states."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Failed to get the joint states. Please try again."
+          }
+        }
+      }
+    },
+    "/api/arm/joints:lock": {
+      "post": {
+        "tags": [
+          "Robot Arm"
+        ],
+        "summary": "Lock all joints.",
+        "description": "Attempt to lock all joints. The system will automatically stop any running Task before locking the joints. Requires authentication.",
+        "operationId": "lockJoints",
+        "responses": {
+          "204": {
+            "description": "Successfully locked the joints."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Unable to lock the joints. Retrying may succeed."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/arm/joints:unlock": {
+      "post": {
+        "tags": [
+          "Robot Arm"
+        ],
+        "summary": "Unlock all joints.",
+        "description": "Attempt to unlock all joints. Requires authentication.",
+        "operationId": "unlockJoints",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successfully unlocked the joints."
+          },
+          "400": {
+            "description": "Invalid `X-Control-Token`"
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnlockJointsFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow unlocking of joints. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Unlocking joints is currently not possible. Retrying may succeed."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/arm/warnings": {
+      "get": {
+        "tags": [
+          "Robot Arm"
+        ],
+        "summary": "Get arm warnings.",
+        "description": "Get the currently active warnings.",
+        "operationId": "getArmWarnings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArmWarnings"
+                }
+              }
+            },
+            "description": "Successfully got arm warnings."
+          }
+        }
+      }
+    },
+    "/api/arm": {
+      "get": {
+        "tags": [
+          "Robot Arm"
+        ],
+        "summary": "Get arm information.",
+        "description": "Get the connection status and information about the Arm (e.g., the Arm type), if available.",
+        "operationId": "getArmInfo",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArmInformation"
+                }
+              }
+            },
+            "description": "Successfully got arm information."
+          }
+        }
+      }
+    },
+    "/api/system/control-token": {
+      "get": {
+        "tags": [
+          "SPoC"
+        ],
+        "summary": "Get information about the current state of the control token.",
+        "description": "Get the current state of the control token, including its owner and any active control requests.",
+        "operationId": "getControlTokenInformation",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlTokenState"
+                }
+              }
+            },
+            "description": "Successfully got the current state of the control token."
+          }
+        }
+      }
+    },
+    "/api/system/control-token:take": {
+      "post": {
+        "tags": [
+          "SPoC"
+        ],
+        "summary": "Try to take the control token.",
+        "description": "Attempt to take the control token for the specified `owner` with an optional `timeout`. The control token becomes invalid after a system reboot and must be requested again. Requires authentication.",
+        "operationId": "takeControlToken",
+        "requestBody": {
+          "content": {
+            "application/json;charset=utf-8": {
+              "schema": {
+                "$ref": "#/components/schemas/TakeControlTokenRequest"
+              }
+            }
+          },
+          "description": "Contains parameters for taking the control token"
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/TakeControlTokenSuccessResponse"
+                }
+              }
+            },
+            "description": "Successfully got the control token. The response contains a valid token."
+          },
+          "400": {
+            "description": "Invalid `body`"
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/TakeControlTokenFailedDependency"
+                }
+              }
+            },
+            "description": "Taking the control token failed due to a timeout (`\"code\": \"Timeout\"`), or the request was overridden by another user (`\"code\": \"RequestOverride\"`)."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system/control-token:release": {
+      "post": {
+        "tags": [
+          "SPoC"
+        ],
+        "summary": "Release the control token.",
+        "description": "Release the control token. Requires authentication.",
+        "operationId": "releaseControlToken",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successfully released the control token."
+          },
+          "400": {
+            "description": "Invalid `X-Control-Token`"
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/end-effector/power": {
+      "get": {
+        "tags": [
+          "End Effector"
+        ],
+        "summary": "Get the end effector power status.",
+        "description": "Returns the power status of the end effector as either \"On\" or \"Off\".",
+        "operationId": "getEndEffectorPower",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndEffectorPowerState"
+                }
+              }
+            },
+            "description": "Successfully retrieved the power status."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "End effector power status is currently unavailable."
+          }
+        }
+      }
+    },
+    "/api/end-effector/power:on": {
+      "post": {
+        "tags": [
+          "End Effector"
+        ],
+        "summary": "Power on the end effector.",
+        "description": "Attempt to power on the end effector of the robot. Requires authentication.",
+        "operationId": "powerOnEndEffector",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successfully powered on the end effector."
+          },
+          "400": {
+            "description": "Invalid `X-Control-Token`"
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndEffectorSetPowerFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow end effector to be powered on. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "End effector power change is currently unavailable."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/end-effector/power:off": {
+      "post": {
+        "tags": [
+          "End Effector"
+        ],
+        "summary": "Power off the end effector.",
+        "description": "Attempt to power off the end effector of the robot. Requires authentication.",
+        "operationId": "powerOffEndEffector",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successfully powered off the end effector."
+          },
+          "400": {
+            "description": "Invalid `X-Control-Token`"
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndEffectorSetPowerFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow end effector to be powered off. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "End effector power change is currently unavailable."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/end-effector/can": {},
+    "/api/safety/self-tests": {
+      "get": {
+        "tags": [
+          "Safety"
+        ],
+        "summary": "Get the state of the self-tests",
+        "description": "Get the current status of the self-tests and the remaining time until the next self-tests are required.",
+        "operationId": "getSelfTestsState",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/SelfTestsStatus"
+                }
+              }
+            },
+            "description": "Successfully got the self-tests state."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Self-tests state is currently unavailable."
+          }
+        }
+      }
+    },
+    "/api/safety/self-tests:execute": {
+      "post": {
+        "tags": [
+          "Safety"
+        ],
+        "summary": "Executes the self-tests.",
+        "description": "Executes the self-tests. If the joints are unlocked, they will be locked during the self-tests and automatically unlocked after successful execution. Note that the call may fail due to an error in unlocking the brakes afterwards, even if the self-tests were successfully performed. Requires authentication.",
+        "operationId": "executeSelfTests",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successfully executed the self-tests."
+          },
+          "400": {
+            "description": "Invalid `X-Control-Token`"
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecuteSelfTestsFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow for self-tests execution. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Executing self-tests is currently not possible. Retrying may succeed."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/safety/log": {
+      "get": {
+        "tags": [
+          "Safety",
+          "Rescue System"
+        ],
+        "summary": "Get the safety log.",
+        "description": "The safety log contains all safety relevant log information. Requires authentication.",
+        "operationId": "getSafetyLog",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain;charset=utf-8": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successfully got the safety log."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/safety/recovery": {
+      "get": {
+        "tags": [
+          "Safety Recovery"
+        ],
+        "summary": "Get safety errors or violations (if any) that must be recovered.",
+        "description": "Get the most critical error category that requires attention if multiple errors are present.",
+        "operationId": "getSafetyRecovery",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryStatus"
+                }
+              }
+            },
+            "description": "Successfully got recovery status."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Recovery status is currently unavailable."
+          }
+        }
+      }
+    },
+    "/api/safety/recovery/joint-motion:start": {
+      "post": {
+        "tags": [
+          "Safety Recovery"
+        ],
+        "summary": "Initiates motion to recover joint errors and violations.",
+        "description": "**Warning**: Ensure the robot is free to move and observe it while the motion is active.\n\nStart a joint motion during a joint error or joint violation recovery. If the motion was successfully started, then this request returns a unique continuation token. To maintain the motion, this token must be sent back to the server via `/safety/recovery/joint-motion:continue` as soon as it has been received.\n\nThe request must include the joint to be moved and a movement type.\n\nAutomatically unlocks the joint in question.\n\nRemember to call [/api/safety/recovery/joint-motion:stop](#/Safety%20Recovery/stopSafetyRecoveryMotion) at the end of every joint motion, otherwise starting another motion will not be possible. Requires authentication.",
+        "operationId": "startSafetyRecoveryMotion",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json;charset=utf-8": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryMotion"
+              }
+            }
+          },
+          "description": "Specify the recovery motion to start."
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContinuationToken"
+                }
+              }
+            },
+            "description": "Motion requested. Reply with the continuation token to start."
+          },
+          "400": {
+            "description": "Invalid `body` or `X-Control-Token`"
+          },
+          "409": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/MotionAborted"
+                }
+              }
+            },
+            "description": ""
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/JointMotionFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow joint motion to be started. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Motion is currently not possible. Retry may succeed."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/safety/recovery/joint-motion:continue": {
+      "post": {
+        "tags": [
+          "Safety Recovery"
+        ],
+        "summary": "Continue the motion to recover joint errors and violations.",
+        "description": "**Warning**: Ensure the robot is free to move and observe it while the motion is active.\n\nContinue a joint motion during a joint error or joint violation recovery. If the motion was successfully continued, then this request returns a unique continuation token. To maintain the motion, this token must be sent back to the server via `/safety/recovery/joint-motion:continue` as soon as it has been received. If the motion is completed (successfully or unsuccessfully), no token is returned and the joint is locked again. Ensure to call [/api/safety/recovery/joint-motion:stop](#/Safety%20Recovery/stopSafetyRecoveryMotion) at the end of every joint motion, otherwise starting another motion will not be possible. Requires authentication.",
+        "operationId": "continueSafetyRecoveryMotion",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json;charset=utf-8": {
+              "schema": {
+                "$ref": "#/components/schemas/ContinuationToken"
+              }
+            }
+          },
+          "description": "Provide the unique continuation token received from the previous request."
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContinuationToken"
+                }
+              }
+            },
+            "description": "Motion is active. Respond with the continuation token or the system will abort the motion."
+          },
+          "204": {
+            "description": "Motion finished successfully."
+          },
+          "400": {
+            "description": "Invalid `body` or `X-Control-Token`"
+          },
+          "409": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/MotionAborted"
+                }
+              }
+            },
+            "description": "Another party aborted the motion."
+          },
+          "422": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadContinuationToken"
+                }
+              }
+            },
+            "description": "Invalid continuation token."
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/JointMotionFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow joint motion to be continued. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Motion is currently not possible. Retry may succeed."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/safety/recovery/joint-motion:stop": {
+      "post": {
+        "tags": [
+          "Safety Recovery"
+        ],
+        "summary": "Aborts any joint recovery motion",
+        "description": "Stop a currently active recovery motion immediately. Requires authentication.",
+        "operationId": "stopSafetyRecoveryMotion",
+        "responses": {
+          "204": {
+            "description": "Motion aborted successfully."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/safety/recovery:start": {
+      "post": {
+        "tags": [
+          "Safety Recovery"
+        ],
+        "summary": "Start the recovery of a safety error or violation.",
+        "description": "Start the recovery of a safety error or violation that requires a recovery procedure. (Refer to [/api/safety/recovery/joint-motion:start](#/Safety%20Recovery/startSafetyRecoveryMotion)). To start recovery of a `JointPositionError`, the safety-operator must make the request. Requires authentication.",
+        "operationId": "startRecovery",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json;charset=utf-8": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRecovery"
+              }
+            }
+          },
+          "description": "Specify the safety error or violation to start the recovery process."
+        },
+        "responses": {
+          "204": {
+            "description": "Recovery started successfully."
+          },
+          "400": {
+            "description": "Invalid `body` or `X-Control-Token`"
+          },
+          "403": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/Forbidden"
+                }
+              }
+            },
+            "description": ""
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow recoveries to be started. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Recovery is currently unavailable."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/safety/recovery:confirm": {
+      "post": {
+        "tags": [
+          "Safety Recovery"
+        ],
+        "summary": "Confirm the recovery of a safety error or violation.",
+        "description": "Confirm the resolution of a safety error or violation. For joint position errors, joint limit violations and other safety rule violations, the user must manually resolve the root cause before this call can succeed. In other cases, this call acknowledges that the error was seen. To confirm `JointPositionError`, the safety-operator must make the request. Requires authentication.",
+        "operationId": "confirmRecovery",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json;charset=utf-8": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmRecovery"
+              }
+            }
+          },
+          "description": "Specify the safety error or violation to recover."
+        },
+        "responses": {
+          "204": {
+            "description": "Recovery successful."
+          },
+          "400": {
+            "description": "Invalid `body` or `X-Control-Token`"
+          },
+          "403": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/Forbidden"
+                }
+              }
+            },
+            "description": ""
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow for confirmation of recovery. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Recovery is currently unavailable."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/safety/configuration:apply-defaults": {},
+    "/api/safety/configuration:apply": {
+      "post": {
+        "tags": [
+          "Safety Configuration"
+        ],
+        "summary": "Applies a pre-defined safety configuration.",
+        "description": "Applies a safety configuration. The configuration must be created, validated, committed, and exported from one robot via the Watchman Franka-UI.\n\nDue to the safety-critical nature of safety configurations it is not in general possible to apply all configurations across robots. Certain rules (e.g., SLP-C) depend on the robot arm and may have to be re-validated manually per robot. Hence, applying a configuration containg such rules may fail. Configurations only containing rules which are independent of the robot arm (such as SLS-C, for example) can be applied across robots because such rules do not have to be manually re-validated. Note that all rules must be manually re-validated if the configuration was exported from a system with a different safety version. Therefore, applying such a configuration will fail. A new configuration must be obtained via Watchman from a system running the corresponding safety version.\n\nEven *if* the safety configuration to be applied does not contain robot-dependent rules, it must be ensured that it is only applied to systems whose cell setup coincides with the setup from which the configuration was exported.\n\nNote that configurations that require re-validation will be committed and leave the system in a non-operational state. To get the system into an operational state again, either manually validate the safety configuration in Watchman, follow the procedure for resetting the system to the default safety configuration, that is described below, or call this endpoint again providing a configuration that does not require re-validation.\n\nA configuration that has been downloaded must not be modified before application. Any attempt to apply a modified configuration will fail.\n\nAt any point in time the full validation report containing the currently active safety settings can be retrieved from `/<robot-ip>/watchman/report` (e.g., for documentation or certification processes). This report contains: \n\n* The full safety configuration containing all rules and parameters.\n\n* All validation hashes.\n\n* The software versions affecting the validation hashes.\n\n* The overall system version.\n\n* The Arm ID.\n\nApplying safety configurations can only be done in `Programming` operating mode. Therefore, if the operating mode is `Execution`, it will be switched to `Programming` and once the safety configuration has been applied, the operating mode will be switched back to `Execution`. It can occur that the call returns failure due to an error in switching back to execution even though the safety configuration was successfully applied.\n\nThis endpoint should be used for resetting the system to the default safety configuration as follows (all steps but the last one only have to be done once):\n\n1. Go to Watchman for one robot, which is running the corresponding system version.\n\n1. Optional: Export the currently active safety configuration (it will be reset in the next step).\n\n1. Reset the safety configuration.\n\n1. If necessary validate the default safety configuration.\n\n1. Commit the validated default safety configuration.\n\n1. Export the validated default safety configuration.\n\n1. Optional: Import the originally active safety configuration on that robot.\n\n1. Use this endpoint to apply the exported validated default safety configuration in order to reset the safety configuration for any robot, which is running the same system version, via API.\n\n Requires the role of safety-operator.",
+        "operationId": "applySafetyConfiguration",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "$ref": "#/components/schemas/SafetyConfigurationFile"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successfully applied the safety configuration."
+          },
+          "400": {
+            "description": "Invalid `body` or `X-Control-Token`"
+          },
+          "422": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/SafetyConfigurationUnprocessableContent"
+                }
+              }
+            },
+            "description": "The applied safety configuration could not be processed"
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/SafetyConfigurationFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow safety configuration to be applied. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Applying safety configuration is currently not possible. Retrying may succeed."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system": {
+      "get": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Get the current system state.",
+        "description": "Get the current system state.",
+        "operationId": "getSystemState",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemState"
+                }
+              }
+            },
+            "description": "Successfully got the current system state."
+          }
+        }
+      }
+    },
+    "/api/system/sse": {
+      "get": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Subscribe to server-sent events containing the current system state. ",
+        "description": "Subscribe to push-style updates containing the current system state.",
+        "operationId": "sseSystemState",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemState"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/system/operating-mode": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get the current operating mode.",
+        "description": "Get information about the current state of the operating mode.",
+        "operationId": "getOperatingMode",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatingModeState"
+                }
+              }
+            },
+            "description": "Successfully got the current operating mode."
+          }
+        }
+      }
+    },
+    "/api/system/operating-mode:change": {
+      "post": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Attempt to change the operating mode.",
+        "description": "Attempt to change the operating mode to the specified mode. Currently, only changes to `Execution` are supported. Requires authentication.",
+        "operationId": "changeOperatingMode",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json;charset=utf-8": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeOperatingModeRequest"
+              }
+            }
+          },
+          "description": "Contains the desired operating mode."
+        },
+        "responses": {
+          "204": {
+            "description": "Successfully changed the operating mode."
+          },
+          "400": {
+            "description": "Invalid `body` or `X-Control-Token`"
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeOperatingModeFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow for an operating mode change. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Failed to change the operating mode because the service is currently unavailable. Retrying may succeed."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system/software": {
+      "get": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Get the state of the software installed on the system.",
+        "description": "Get information about the versions of the software installed on the system. This includes versions of App bundles, features, and the System Image version.",
+        "operationId": "getSystemSoftware",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/SoftwareState"
+                }
+              }
+            },
+            "description": "Successfully got the state of the software installed on the system."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system/software/status-token": {
+      "get": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Get an encoded token representing the state of the installed software.",
+        "description": "Get an encoded token representing the current software state. Use this token to manually update Franka World about the installed software. This is necessary for managing Feature and App licenses when the robot system is offline. \n\nFor more details, refer to the documentation of [/api/system/software/update:apply](#/System/applySoftwareUpdate).",
+        "operationId": "getSoftwareStatusToken",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusToken"
+                }
+              }
+            },
+            "description": "Successfully got the encoded token."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system/software/update": {
+      "get": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Get the the currently pending software updates.",
+        "description": "Get the pending software updates to be applied via the `update:apply` endpoint. This list shows the differences between the currently installed software versions and the versions to be installed.\n\nFor more details, refer to the documentation of [/api/system/software/update:apply](#/System/applySoftwareUpdate).",
+        "operationId": "getSoftwareUpdate",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/SoftwareChanges"
+                }
+              }
+            },
+            "description": "Successfully got the list of pending software updates."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Resets the currently pending software updates.",
+        "description": "Resets the pending software updates. This will remove all update files previously prepared on the system using the update:prepare-* commands. Use this command to prepare a different update.\n\n Requires the role of admin.",
+        "operationId": "resetSoftwareUpdate",
+        "responses": {
+          "204": {
+            "description": "Successfully reset the pending software updates."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system/software/update:prepare-online": {
+      "post": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Prepares the system for an update via the Franka World.",
+        "description": "Prepares the system for an update by automatically fetching all available software updates (see the `availableUpdates` field in the result of [/api/system/software](#/System/getSystemSoftware)) from Franka World. This requires an active internet connection. After fetching, the system will be ready for an update, but the updates will not be installed yet. \n\nFor more details, refer to the documentation of [/api/system/software/update:apply](#/System/applySoftwareUpdate).\n\n Requires the role of admin.",
+        "operationId": "prepareOnlineUpdate",
+        "responses": {
+          "204": {
+            "description": "Successfully prepared the system for an update via Franka World."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system/software/update:prepare-offline": {
+      "post": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Prepares the system for an offline update by making all software updates ready for installation.",
+        "description": "Prepares the system for an offline update by using the provided update file from Franka World. This file contains all necessary software updates. After preparation, apply the pending update using the update:apply command. \n\nFor more details, refer to the documentation of [/api/system/software/update:apply](#/System/applySoftwareUpdate).\n\n Requires the role of admin.",
+        "operationId": "prepareOfflineUpdate",
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateFile"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successfully prepared the system for an offline update."
+          },
+          "400": {
+            "description": "Invalid `body`"
+          },
+          "422": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateFileException"
+                }
+              }
+            },
+            "description": "Failed to prepare the system for an offline update due to an outdated or invalid update file."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system/software/update:apply": {
+      "post": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Install the pending software updates that were previously prepared.",
+        "description": "Install the pending software updates that were previously prepared via [/api/system/software/update:prepare-online](#/System/prepareOnlineUpdate) or [/api/system/software/update:prepare-offline](#/System/prepareOfflineUpdate). \n\n**Warning**: Applying an update to a version lower than the currently installed version will trigger an **automatic** factory reset! The `factoryResetRequired` field in the result of [/api/system/software](#/System/getSystemSoftware) indicates if an automatic reset is necessary.\n\n## Installing Software Updates on the System \n\n\nYou can install software updates on the system in two ways: \n\n### Online Update \n\n\nThis is the preferred method when the system is connected to the internet. The system will automatically handle most parts of the **online update** once triggered by the user, requiring less effort from the user. \n\nTo perform an **online update**, ensure the system has a stable internet connection and follow these steps: \n\n1. Prepare the **online update** via    [/api/system/software/update:prepare-online](#/System/prepareOnlineUpdate). \n\n   The system will automatically fetch all available software updates (see the `availableUpdates` field in the result of [/api/system/software](#/System/getSystemSoftware)). \n\n1. (Optional) Check the now pending updates via [/api/system/software/update](#/System/getSoftwareUpdate). \n\n   This step allows you to verify that the pending updates match the desired state.\n\n1. Apply the software update via [/api/system/software/update:apply](#/System/applySoftwareUpdate). \n\n   The system will install the prepared software update. After installation, the system will reboot if any of the following conditions are met: \n\n   - A system update was installed \n   - A feature was installed, updated, or removed \n\n1. The Franka World is automatically notified about the software installation. \n\n   No further action is required as this happens automatically with the **online update**. \n\n### Offline Update \n\n\nIf the system is not connected to the internet, the **offline update** is the only way to install an update. This method requires more steps than the **online update**: \n\n1. Prepare the **offline update** via [/api/system/software/update:prepare-offline](#/System/prepareOfflineUpdate). \n\n   You need an update file from the Franka World. Upload this file to the system to prepare all software updates    available in the file.\n\n1. (Optional) Check the pending updates via [/api/system/software/update](#/System/getSoftwareUpdate). \n\n   This step allows you to verify that the pending updates match the desired state. \n\n1. Apply the software update via [/api/system/software/update:apply](#/System/applySoftwareUpdate). \n\n   The system will install the prepared software update. After installation, the system will reboot if    any of the following conditions are met: \n\n   - A system update was installed \n   - A feature was installed, updated, or removed \n\n1. **Important**: Notify the Franka World about the installation by uploading the    status token retrieved via [/api/system/software/status-token](#/System/getSoftwareStatusToken) to the Franka World.\n\n   This step ensures the latest state of the system is reflected in the Franka World.    By doing so, you make sure that software licenses uninstalled during the update are available for other systems. Requires the role of admin.",
+        "operationId": "applySoftwareUpdate",
+        "responses": {
+          "204": {
+            "description": "Successfully applied the pending software updates."
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyChangesFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow for application of pending software updates. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system/log": {
+      "get": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Get the encrypted system log.",
+        "description": "Encrypt and retrieve the system log.",
+        "operationId": "getSystemLog",
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successfully retrieved the system log."
+          }
+        }
+      }
+    },
+    "/api/system/log/public/cyclic": {
+      "get": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Get cyclic system logs.",
+        "description": "Retrieve a logfile containing system information, such as system temperature or system runtime, that is cyclically logged.",
+        "operationId": "getPublicCyclicLogs",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain;charset=utf-8": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successfully retrieved the cyclic logs."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system/log/public/events": {
+      "get": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Get event system logs.",
+        "description": "Retrieve logs containing system information pertaining to specific events such as joint torque overload, the toggling of safe signals, FCI package loss, or brake locking and unlocking.",
+        "operationId": "getPublicEventsLogs",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain;charset=utf-8": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successfully retrieved the events logs."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system:shutdown": {
+      "post": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Initiates a system shutdown.",
+        "description": "Attempts to initiate a system shutdown. Requires authentication.",
+        "operationId": "shutdownSystem",
+        "responses": {
+          "204": {
+            "description": "System shutdown initiated."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system:reboot": {
+      "post": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Initiates a system reboot.",
+        "description": "Attempts to initiate a system reboot. Requires authentication.",
+        "operationId": "rebootSystem",
+        "responses": {
+          "204": {
+            "description": "System reboot initiated."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/system:factory-reset": {
+      "post": {
+        "tags": [
+          "System",
+          "Rescue System"
+        ],
+        "summary": "Reset the system to factory defaults.",
+        "description": "Reset the system to factory default configurations. This deletes all configurations (including network, end effector as well as user and safety configurations), all created Tasks, and all installed Apps and Features.\n\nThe system will reboot automatically to apply the changes.\n\n Requires the role of admin.",
+        "operationId": "systemFactoryReset",
+        "responses": {
+          "204": {
+            "description": "System successfully reset to factory defaults and is now rebooting."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/fci": {
+      "get": {
+        "tags": [
+          "FCI"
+        ],
+        "summary": "Get the current FCI state.",
+        "description": "Retrieve the current FCI state.",
+        "operationId": "getFciState",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/FCIState"
+                }
+              }
+            },
+            "description": "Successfully retrieved the current FCI state."
+          }
+        }
+      }
+    },
+    "/api/fci:activate": {
+      "post": {
+        "tags": [
+          "FCI"
+        ],
+        "summary": "Activate FCI.",
+        "description": "Activate FCI. If a work execution wait time > 0 is configured (via the Settings Franka-UI), FCI activation is delayed accordingly. Requires authentication.",
+        "operationId": "activateFci",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successfully activated FCI."
+          },
+          "400": {
+            "description": "Invalid `X-Control-Token`"
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivateFCIFailedDependency"
+                }
+              }
+            },
+            "description": "The current system state does not allow for FCI activation. To resolve this, user action may be required. Check the `\"details\"` field of the response for information about the necessary actions."
+          },
+          "503": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailable"
+                }
+              }
+            },
+            "description": "Activating FCI is currently unavailable."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/fci:deactivate": {
+      "post": {
+        "tags": [
+          "FCI"
+        ],
+        "summary": "Deactivate FCI.",
+        "description": "Deactivate FCI. Requires authentication.",
+        "operationId": "deactivateFci",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successfully deactivated FCI."
+          },
+          "400": {
+            "description": "Invalid `X-Control-Token`"
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/configuration": {
+      "get": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Get the current system configuration.",
+        "description": "Retrieve the current system configuration. Requires the role of admin.",
+        "operationId": "getSystemConfiguration",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetConfiguration"
+                }
+              }
+            },
+            "description": "Successfully retrieved the system configuration."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Change the system configuration.",
+        "description": "Attempt to change the system configuration. The top-level entries of the provided configuration are optional. If left out, the corresponding configurations remain unchanged. Requires the role of admin.",
+        "operationId": "changeSystemConfiguration",
+        "parameters": [
+          {
+            "description": "The currently active control token.",
+            "in": "header",
+            "name": "X-Control-Token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json;charset=utf-8": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigurationNormal"
+              }
+            }
+          },
+          "description": "Contains the system configuration to be set."
+        },
+        "responses": {
+          "204": {
+            "description": "Successfully changed the system configuration."
+          },
+          "400": {
+            "description": "Invalid `body` or `X-Control-Token`"
+          },
+          "422": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnprocessableContent"
+                }
+              }
+            },
+            "description": "The system configuration is invalid or has conflicts."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          }
+        ]
+      }
+    },
+    "/api/configuration/initial": {
+      "put": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Set the initial system configuration.",
+        "description": "Attempt to set the initial system configuration.",
+        "operationId": "setInitialSystemConfiguration",
+        "requestBody": {
+          "content": {
+            "application/json;charset=utf-8": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigurationInitial"
+              }
+            }
+          },
+          "description": "Contains the initial system configuration"
+        },
+        "responses": {
+          "204": {
+            "description": "Successfully set the initial system configuration."
+          },
+          "400": {
+            "description": "Invalid `body`"
+          },
+          "422": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnprocessableContent"
+                }
+              }
+            },
+            "description": "The system configuration is invalid or has conflicts."
+          },
+          "424": {
+            "content": {
+              "application/json;charset=utf-8": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigurationFailedDependency"
+                }
+              }
+            },
+            "description": "Could not apply the initial system configuration because it has already been set. To detect whether this is the case, use the [/api/system](#/System/getSystemState) endpoint and check for `status != \"FirstStart\"`."
+          }
+        }
+      }
+    },
+    "/api/configuration/arm-mounting": {}
+  },
+  "components": {
+    "schemas": {
+      "MotionAborted": {
+        "description": "The motion was aborted by a `:stop` call.",
+        "example": {
+          "code": "MotionAborted"
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "MotionAborted"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "ArmMotionFailedDependency": {
+        "description": "Performing arm motion failed due to the reason included.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "MotionInProgress"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/ArmMotionErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "ArmMotionErrorCode": {
+        "description": "Reason why arm motion failed.\n\n`MotionInProgress`: There is already an active motion. \n\n`TaskRunning`: A Task is currently running. \n\n`MonitoredStandstill`: There is a safety enforced monitored standstill. \n\n`BrakesClosed`: Brakes are closed. \n\n`WrongOperatingMode`: This call is only valid in operation mode Execution, please switch first. \n\n`LifetimeConfirmationNeeded`: Robot lifetime excess must be confirmed. \n\n`EmergencyStopPressed`: The emergency stop is pressed, please release it first. \n\n`RecoverableSafetyErrorActive`: Another recoverable error with a higher priority must be recovered first. \n\n`SafetySettingsUnvalidated`: Safety settings are unvalidated, please validate first.",
+        "enum": [
+          "MotionInProgress",
+          "TaskRunning",
+          "MonitoredStandstill",
+          "BrakesClosed",
+          "WrongOperatingMode",
+          "LifetimeConfirmationNeeded",
+          "EmergencyStopPressed",
+          "RecoverableSafetyErrorActive",
+          "SafetySettingsUnvalidated"
+        ],
+        "example": "MotionInProgress",
+        "type": "string"
+      },
+      "ServiceUnavailable": {
+        "description": "Response if a request failed because the service is temporarily unavailable. Retry might succeed.",
+        "example": {
+          "code": "ServiceUnavailable"
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ServiceUnavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "ArmMotion": {
+        "description": "Specifies a type of motion that can be executed by the robot arm. Note that the list of these codes may be subject to extension.\n\n`MoveToPackPose`: Moves the robot into its pack position. **Warning**: The end effector must be removed before moving to pack position.",
+        "example": {
+          "type": "MoveToPackPose"
+        },
+        "properties": {
+          "type": {
+            "enum": [
+              "MoveToPackPose"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "JointStates": {
+        "description": "Provides information about the robot's joints.",
+        "example": [
+          {
+            "brakeStatus": "Unlocked",
+            "joint": 1
+          },
+          {
+            "brakeStatus": "Unlocked",
+            "joint": 2
+          },
+          {
+            "brakeStatus": "Unlocked",
+            "joint": 3
+          },
+          {
+            "brakeStatus": "Unlocked",
+            "joint": 4
+          },
+          {
+            "brakeStatus": "Unlocked",
+            "joint": 5
+          },
+          {
+            "brakeStatus": "Unlocked",
+            "joint": 6
+          },
+          {
+            "brakeStatus": "Unlocked",
+            "joint": 7
+          }
+        ],
+        "items": {
+          "$ref": "#/components/schemas/JointState"
+        },
+        "type": "array"
+      },
+      "JointState": {
+        "description": "Provides information about a specific joint.",
+        "example": {
+          "brakeStatus": "Unlocked",
+          "joint": 4
+        },
+        "properties": {
+          "brakeStatus": {
+            "$ref": "#/components/schemas/BrakeStatus"
+          },
+          "joint": {
+            "description": "A joint numbered from 1 to 7, starting from the robot's base.",
+            "maximum": 7,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "joint",
+          "brakeStatus"
+        ],
+        "type": "object"
+      },
+      "BrakeStatus": {
+        "description": "Describes the possible statuses of a joint's brake.\n\n`Locked`: The joint is locked and cannot move.\n\n`Unlocked`: The joint is unlocked and can move.\n\n",
+        "enum": [
+          "Locked",
+          "Unlocked"
+        ],
+        "example": "Locked",
+        "type": "string"
+      },
+      "UnlockJointsFailedDependency": {
+        "description": "Response if unlocking joints failed.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "EmergencyStopPressed",
+            "RecoverableSafetyErrorActive"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/UnlockJointsErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "UnlockJointsErrorCode": {
+        "description": "Reason for failing to unlock joints. Note that this list of codes may be extended.\n\n`EmergencyStopPressed`: The emergency stop is pressed, please release it first. \n\n`RecoverableSafetyErrorActive`: Another recoverable error with a higher priority must be recovered first. \n\n`ExternalEnablingDeviceWrongState`: The external enabling device is in the wrong state.",
+        "enum": [
+          "EmergencyStopPressed",
+          "RecoverableSafetyErrorActive",
+          "ExternalEnablingDeviceWrongState"
+        ],
+        "example": "EmergencyStopPressed",
+        "type": "string"
+      },
+      "ArmWarnings": {
+        "description": "The currently active warnings of the arm.",
+        "example": {
+          "closeToSingularity": false
+        },
+        "properties": {
+          "closeToSingularity": {
+            "description": "Indicates that the arm is close to a singularity. Generally speaking, during motions of the end-effector in three-dimensional space high and unexpected joint velocities can be produced if the arm is passing near singularities. The robotic system prevents such high velocities by causing a motion failure. This warning helps to determine that the robot is near a singular configuration.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "closeToSingularity"
+        ],
+        "type": "object"
+      },
+      "ArmInformation": {
+        "description": "Describes all possible arm statuses:\n\n`NotConnected`. No Arm is currently connected or there is some connection issue preventing an Arm to be detected.\n\n`Unknown`. An Arm appears to be connected, but the system is unable to identify its type.\n\n`Connecting`: A connection to the Arm is currently being established.\n\n`Connected. Arm type: armType`: An arm of type `armType` is connected.\n\n",
+        "example": {
+          "status": "Connecting"
+        },
+        "properties": {
+          "armType": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "NotConnected",
+              "Unknown",
+              "Connecting",
+              "Connected"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "ControlTokenState": {
+        "description": "Shows the current state of the control token.",
+        "example": {
+          "owner": "owner",
+          "requester": "requester",
+          "tokenId": 1
+        },
+        "properties": {
+          "owner": {
+            "description": "The name of the control token's owner. Will be `null` if the control token is available.",
+            "type": "string"
+          },
+          "requester": {
+            "description": "The name of the last user requesting control. Will be `null` if no one is currently requesting control.",
+            "type": "string"
+          },
+          "tokenId": {
+            "description": "The identifier assigned by the system to each token. It allows to uniquely identify which token is active.",
+            "format": "int32",
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "TakeControlTokenSuccessResponse": {
+        "description": "Indicates that taking the control token was successful.",
+        "example": {
+          "token": "YQbufEOTT7WUSGZEgccfpOmdTpi3VEqvdqNsSLc+bUM=",
+          "tokenId": 1
+        },
+        "properties": {
+          "token": {
+            "description": "The valid token.",
+            "type": "string"
+          },
+          "tokenId": {
+            "description": "The identifier assigned by the system to each token. It allows to uniquely identify which token is active.",
+            "format": "int32",
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "token",
+          "tokenId"
+        ],
+        "type": "object"
+      },
+      "TakeControlTokenFailedDependency": {
+        "description": "Response if taking the control token failed.",
+        "example": {
+          "code": "Timeout"
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "Timeout",
+              "RequestOverride"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "TakeControlTokenRequest": {
+        "description": "Request to take the control token. The timeout in seconds is optional. It specifies how long to wait if someone else currently holds the token. If not specified, the request will wait indefinitely.",
+        "example": {
+          "owner": "franka"
+        },
+        "properties": {
+          "owner": {
+            "description": "A name for the owner of the control token.",
+            "type": "string"
+          },
+          "timeout": {
+            "$ref": "#/components/schemas/TimeoutValue"
+          }
+        },
+        "required": [
+          "owner"
+        ],
+        "type": "object"
+      },
+      "TimeoutValue": {
+        "exclusiveMinimum": true,
+        "format": "float",
+        "minimum": 0,
+        "type": "number"
+      },
+      "EndEffectorPowerState": {
+        "description": "Contains the current state of the end effector power.",
+        "example": {
+          "status": "On"
+        },
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/EndEffectorPowerStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "EndEffectorPowerStatus": {
+        "description": "Indicates the current power status of the end effector.",
+        "enum": [
+          "On",
+          "Off"
+        ],
+        "example": "On",
+        "type": "string"
+      },
+      "EndEffectorSetPowerFailedDependency": {
+        "description": "Failed to set the power of the end effector.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "SeepoEnforced"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/EndEffectorSetPowerErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "EndEffectorSetPowerErrorCode": {
+        "description": "Reason for the failure to set the end effector power.\n\n`SeepoEnforced`: Safe End Effector Power Off (SEEPO) is active. Depending on the configured SEEPO behavior in the Safety Setup of the active safety configuration (see Watchman Franka-UI), end effector power is automatically cut if any configured condition is met (e.g., when the emergency stop is triggered). As long as any of these conditions persist, any attempt to change end effector power will result in this error code.",
+        "enum": [
+          "SeepoEnforced"
+        ],
+        "example": "SeepoEnforced",
+        "type": "string"
+      },
+      "SelfTestsStatus": {
+        "description": "Describes the possible self-test statuses:\n\n`OK. Remaining seconds: n`: No self-tests are required (`n` seconds remaining).\n\n`Warning. Remaining seconds: n`: Self-tests are due soon (in `n` seconds).\n\n`Elapsed`: Self-tests are overdue and must be executed.\n\n`Running`: Self-tests are currently in progress.\n\n",
+        "example": {
+          "remaining": 3600,
+          "status": "OK"
+        },
+        "properties": {
+          "remaining": {
+            "exclusiveMinimum": false,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "OK",
+              "Warning",
+              "Elapsed",
+              "Running"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "ExecuteSelfTestsFailedDependency": {
+        "description": "Response if execution of self-tests failed.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "ExecutionRunning"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/ExecuteSelfTestsErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "ExecuteSelfTestsErrorCode": {
+        "description": "Codes that describe possible reasons for not being able to execute the self-tests or to unlock the joints afterwards, if they were initially unlocked. Note that the list of these codes may be subject to extension.\n\n`ExecutionRunning`: The execution has to be stopped before self-tests can be executed. \n\n`SelfTestsInProgress`: The self-tests are already running. \n\n`JointsInOperation`: The joints are currently unlocking or locking. The joint operation has to be finished before self-tests can be executed. \n\n`EmergencyStopPressed`: The emergency stop is pressed, please release it first. \n\n`RecoverableSafetyErrorActive`: Another recoverable error with a higher priority must be recovered first. \n\n`SafetyRecoveryActive`: Another safety-critical recovery is already in progress.",
+        "enum": [
+          "ExecutionRunning",
+          "SelfTestsInProgress",
+          "JointsInOperation",
+          "EmergencyStopPressed",
+          "RecoverableSafetyErrorActive",
+          "SafetyRecoveryActive"
+        ],
+        "example": "ExecutionRunning",
+        "type": "string"
+      },
+      "RecoveryStatus": {
+        "description": "Describes the recovery actions that need to be performed.",
+        "example": {
+          "recovery": {
+            "joints": [
+              1,
+              3
+            ],
+            "type": "JointPositionError"
+          }
+        },
+        "properties": {
+          "recovery": {
+            "$ref": "#/components/schemas/Recovery"
+          }
+        },
+        "type": "object"
+      },
+      "Recovery": {
+        "description": "An error state requiring user resolution:\n\n`LifetimeStatusExceeded`: The joint lifetime of the arm has been exceeded.\n\n`SelfTestsElapsed`: Self-tests are due (see: [/api/safety/self-tests](#/Safety/getSelfTestsState)).\n\n`GenericJointError`: An unclassified joint error that might be recoverable. \n\n`SafetyError`: A safety error that prevents further execution (includes a list of safety errors).\n\n`SafeInputUnacknowledged`: A safe input was triggered and needs confirmation (includes a list of safe inputs).\n\n`JointPositionError`: A joint position sensor error occurred (includes a list of affected joints).\n\n`JointLimitViolation`: One or more joints are outside their limits (includes a list of affected joints).\n\n`SafetyRuleViolation`: A safety rule was violated.",
+        "example": {
+          "joints": [
+            1,
+            3
+          ],
+          "type": "JointPositionError"
+        },
+        "properties": {
+          "joints": {
+            "items": {
+              "maximum": 7,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "safeInputs": {
+            "items": {
+              "$ref": "#/components/schemas/SafeInput"
+            },
+            "type": "array"
+          },
+          "safetyErrors": {
+            "items": {
+              "$ref": "#/components/schemas/SafetyError"
+            },
+            "type": "array"
+          },
+          "type": {
+            "enum": [
+              "LifetimeStatusExceeded",
+              "SelfTestsElapsed",
+              "GenericJointError",
+              "SafetyError",
+              "SafeInputUnacknowledged",
+              "JointPositionError",
+              "JointLimitViolation",
+              "SafetyRuleViolation"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "SafetyError": {
+        "enum": [
+          "EmergencyStopError",
+          "SafeInputX32Error",
+          "SafeInputX33Error",
+          "ExternalEnablingDeviceError",
+          "GuidingEnablingDeviceError",
+          "SafeArmConnectionError",
+          "EnvironmentDataTimeout"
+        ],
+        "type": "string"
+      },
+      "SafeInput": {
+        "enum": [
+          "SafeInputX32",
+          "SafeInputX33"
+        ],
+        "type": "string"
+      },
+      "ContinuationToken": {
+        "description": "A unique token that must be sent back to the server to keep the motion running.",
+        "example": {
+          "continuationToken": "abcdefg1234xyz"
+        },
+        "properties": {
+          "continuationToken": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "continuationToken"
+        ],
+        "type": "object"
+      },
+      "JointMotionFailedDependency": {
+        "description": "Joint motion failed due to the included reason.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "ExternalEnablingDeviceNotPressed"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/JointMotionErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "JointMotionErrorCode": {
+        "description": "Reason why recovery robot motion might fail.\n\n`EmergencyStopPressed`: The emergency stop is pressed, please release it first. \n\n`SafetyRecoveryActive`: Another safety-critical recovery is already in progress. \n\n`RecoverableSafetyErrorActive`: Another recoverable error with a higher priority must be recovered first. \n\n`MotionInProgress`: There is already an active motion. \n\n`NoMotionInProgress`: There is no active motion. \n\n`NoRecoveryActive`: Recovery must be started before joint motion is possible. \n\n`ConnectionClosed`: Connection was closed (likely due to a continuation token sent too late). \n\n`ExternalEnablingDeviceNotPressed`: The external enabling device has to be pressed in order to perform the action.",
+        "enum": [
+          "EmergencyStopPressed",
+          "SafetyRecoveryActive",
+          "RecoverableSafetyErrorActive",
+          "MotionInProgress",
+          "NoMotionInProgress",
+          "NoRecoveryActive",
+          "ConnectionClosed",
+          "ExternalEnablingDeviceNotPressed"
+        ],
+        "example": "EmergencyStopPressed",
+        "type": "string"
+      },
+      "RecoveryMotion": {
+        "properties": {
+          "joint": {
+            "maximum": 7,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "type": {
+            "$ref": "#/components/schemas/RecoveryMotionType"
+          }
+        },
+        "required": [
+          "type",
+          "joint"
+        ],
+        "type": "object"
+      },
+      "RecoveryMotionType": {
+        "description": "Type of joint motion: \n\n`MoveToReferencePosition`: Moves a single joint to its reference position (requires safety-operator role).\n\n`MoveOutOfJointLimit`: Moves a single joint out of its position limit.\n\n`MovePositive`: Moves a single joint in the positive direction.\n\n`MoveNegative`: Moves a single joint in the negative direction.",
+        "enum": [
+          "MoveToReferencePosition",
+          "MoveOutOfJointLimit",
+          "MovePositive",
+          "MoveNegative"
+        ],
+        "type": "string"
+      },
+      "BadContinuationToken": {
+        "description": "The continuation token does not match any active motion.",
+        "example": {
+          "code": "BadContinuationToken"
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "BadContinuationToken"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "Forbidden": {
+        "description": "A safety-operator must perform joint position error recovery.",
+        "example": {
+          "code": "Forbidden"
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "Forbidden"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "RecoveryFailedDependency": {
+        "description": "Failed to recover safety error or violation due to the included reasons.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "NoAckRequired"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/RecoveryErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "RecoveryErrorCode": {
+        "description": "Reason why recovery failed.\n\n`AckPending`: There is another pending acknowledgement request. \n\n`JointErrorRemaining`: There is still an error remaining in at least one of the joints. \n\n`NoAckRequired`: You tried to acknowledge an error, but no acknowledgement is required. \n\n`NoViolationActive`: No violations are currently active. \n\n`RecoverableSafetyErrorActive`: Another recoverable error with a higher priority must be recovered first. \n\n`RecoveryActive`: Another recovery process is already in progress. \n\n`SafetyRecoveryActive`: Another safety-critical recovery is already in progress. \n\n`WrongViolationRecoveryType`: The requested recovery has a wrong violation recovery type. \n\n`NoJointRecoveryRequired`: The joint does not need to be recovered.",
+        "enum": [
+          "AckPending",
+          "JointErrorRemaining",
+          "NoAckRequired",
+          "NoViolationActive",
+          "RecoverableSafetyErrorActive",
+          "RecoveryActive",
+          "SafetyRecoveryActive",
+          "WrongViolationRecoveryType",
+          "NoJointRecoveryRequired"
+        ],
+        "example": "AckPending",
+        "type": "string"
+      },
+      "StartRecovery": {
+        "description": "Type of recovery: \n\n`JointPositionError`: Starts joint position error recovery (requires safety-operator role).\n\n`JointLimitViolation`: Starts joint limit violation recovery.\n\n",
+        "example": {
+          "type": "JointPositionError"
+        },
+        "properties": {
+          "type": {
+            "enum": [
+              "JointPositionError",
+              "JointLimitViolation"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "ConfirmRecovery": {
+        "description": "Confirm the resolution of an error state (for details on these values, see the response documentation of [GET /api/safety/recovery](#/Safety%20Recovery/getSafetyRecovery)):\n\n`LifetimeStatusExceeded`\n\n`SelfTestsElapsed`: This operation is long running.\n\n`GenericJointError`: This operation is long running.\n\n`SafetyError`\n\n`SafeInputUnacknowledged`\n\n`JointPositionError`: Requires safety-operator role to resolve. First, move all violated joints to their reference positions. The safety-operator **must** visually confirm that all violated joints have returned to their reference positions, which can be found in the product manual.\n\n`JointLimitViolation`\n\n`SafetyRuleViolation`",
+        "example": {
+          "type": "JointPositionError"
+        },
+        "properties": {
+          "safeInputs": {
+            "items": {
+              "$ref": "#/components/schemas/SafeInput"
+            },
+            "type": "array"
+          },
+          "safetyErrors": {
+            "items": {
+              "$ref": "#/components/schemas/SafetyError"
+            },
+            "type": "array"
+          },
+          "type": {
+            "enum": [
+              "LifetimeStatusExceeded",
+              "SelfTestsElapsed",
+              "GenericJointError",
+              "SafetyError",
+              "SafeInputUnacknowledged",
+              "JointPositionError",
+              "JointLimitViolation",
+              "SafetyRuleViolation"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "SafetyConfigurationFailedDependency": {
+        "description": "Failed to apply a safety configuration.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "SafeInputInvalid"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeOperatingModeErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "ChangeOperatingModeErrorCode": {
+        "description": "Codes that describe why changing the operating mode is not possible. This list may be extended in the future.",
+        "enum": [
+          "TaskRunning",
+          "BrakesInOperation",
+          "SafeInputInvalid",
+          "EmergencyStopPressed",
+          "ExternalEnablingDevicePressed",
+          "GuidingEnabled",
+          "RecoverableSafetyErrorActive"
+        ],
+        "example": "BrakesInOperation",
+        "type": "string"
+      },
+      "SafetyConfigurationUnprocessableContent": {
+        "description": "Failed to process the safety configuration file. Possible reasons:\n\n`RevalidationNeeded`: The configuration requires manual verification or was exported from a system with a different safety version. Note that the configuration has been committed and the system might be in a non-operational state.\n\n`InvalidFile`: The configuration file is invalid (e.g., because it was manually modified).\n\n",
+        "example": {
+          "code": "RevalidationNeeded"
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "RevalidationNeeded",
+              "InvalidFile"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "SafetyConfigurationFile": {
+        "description": "The file containing the safety configuration to be applied. This file can be retreived by creating, validating, committing, and exporting a safety configuration in the Watchman Franka-UI.",
+        "format": "binary",
+        "type": "string"
+      },
+      "SystemState": {
+        "description": "Contains the current state of the system.",
+        "example": {
+          "cloud": {
+            "account": "my-franka-world-account",
+            "connection": {
+              "status": "Online"
+            }
+          },
+          "controlSerialNumber": "123456-7654321",
+          "operatingMode": {
+            "status": "Execution"
+          },
+          "status": "Started"
+        },
+        "properties": {
+          "cloud": {
+            "$ref": "#/components/schemas/CloudState"
+          },
+          "controlSerialNumber": {
+            "$ref": "#/components/schemas/ControlSerialNumber"
+          },
+          "operatingMode": {
+            "$ref": "#/components/schemas/OperatingModeState"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SystemStatus"
+          }
+        },
+        "required": [
+          "status",
+          "operatingMode",
+          "controlSerialNumber",
+          "cloud"
+        ],
+        "type": "object"
+      },
+      "SystemStatus": {
+        "description": "The current status of the system.\n\n`Starting`: The system is currently starting.\n\n`FirstStart`: The system is in first start mode and must be configured.\n\n`Started`: The system has successfully started and is in a nominal state.\n\n`RescueSystem`: The system is in rescue mode.\n\n`RebootRequired`: An unrecoverable error occurred (possible reasons include that no arm or an arm with an unkown type are detected by the system). Please download logs and restart the system.\n\n",
+        "enum": [
+          "Starting",
+          "FirstStart",
+          "Started",
+          "RescueSystem",
+          "RebootRequired"
+        ],
+        "example": "Started",
+        "type": "string"
+      },
+      "OperatingModeState": {
+        "description": "The current state of the operating mode.",
+        "example": {
+          "status": "Execution"
+        },
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/OperatingModeStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "OperatingModeStatus": {
+        "description": "The current operating mode.\n\n`Programming`: The operating mode is `Programming`. Robot motions are possible only when the external enabling device is pressed.\n\n`Execution`: The operating mode is `Execution`.\n\n`SafetyRecovery`: Recover a safety error.\n\n`SelfTest`: The system is performing self tests.\n\n`Undefined`: The system is in startup phase, the brakes are in operation, or a safety error is present.\n\n",
+        "enum": [
+          "Programming",
+          "Execution",
+          "SafetyRecovery",
+          "SelfTest",
+          "Undefined"
+        ],
+        "example": "Execution",
+        "type": "string"
+      },
+      "ControlSerialNumber": {
+        "description": "Contains the serial number of Control.",
+        "example": "123456-7654321",
+        "type": "string"
+      },
+      "CloudState": {
+        "description": "The state of the cloud connection of the system including the currently active Franka World account.",
+        "example": {
+          "account": "my-franka-world-account",
+          "connection": {
+            "status": "Online"
+          }
+        },
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "connection": {
+            "$ref": "#/components/schemas/CloudConnectionState"
+          }
+        },
+        "required": [
+          "connection"
+        ],
+        "type": "object"
+      },
+      "CloudConnectionState": {
+        "description": "The status of the connection to the Franka World.",
+        "properties": {
+          "offlineReason": {
+            "$ref": "#/components/schemas/OfflineReason"
+          },
+          "status": {
+            "enum": [
+              "Online",
+              "Offline"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "OfflineReason": {
+        "description": "The reason why the connection to the Franka World is \"Offline\". \n\n - `NoNetwork`: No network connection is established at the shopfloor network (C2). Please check the Network Settings and make sure that the cable is properly connected.\n- `NoGatewayConfigured`: Your static network configuration does not specify a gateway. In order to connect to Franka World, you need to configure a gateway with your static IP address in the Network Settings.\n- `NoNameserverConfigured`: Your static network configuration does not specify a nameserver. In order to connect to Franka World, you need to configure a nameserver in the Network Settings. You can also use a publicly available nameserver like 8.8.8.8.\n- `LinkLocalAddress`: The system uses a link local IPv4 address (self assigned through stateless autoconfiguration). Make sure that the cable is properly connected and that there is a DHCP server on the network, which assigns an IPv4 address to this system. Alternatively switch to a static configuration in the Network Settings.\n- `NoGateway`: The DHCP server on your network did not promote a gateway. Make sure the DHCP server allows this system to connect to the internet. Alternatively switch to a static configuration in the Network Settings.\n- `NoNameserver`: The DHCP server on your network did not promote a nameserver. Make sure the DHCP server promotes a nameserver. Alternatively switch to a static configuration in the Network Settings.\n- `DNSLookupFailed`: The DNS lookup of the Franka World endpoint failed. Please check the Network Settings to ensure that the system can resolve global DNS names.\n- `ConnectionRefused`: The connection to Franka World was refused. Please check potential firewalls on your network, whether they allow the connection to Franka World.\n- `NetworkUnreachable`: The local network is unreachable from the system. Please check your network connection and settings and make sure the cable is properly wired.\n- `NoRouteToHostStatic`: The gateway of your static configuration in Network Settings is not responding.  Make sure you have set the proper address, netmask and gateway. A firewall might also be blocking the access.\n- `NoRouteToHostDHCP`: No route to host while trying to connect to Franka World. A firewall could be blocking the access or your DHCP lease is not working.\n- `ConnectionTimedOut`: The connection to Franka World timed out. Please check your internet connection or check for firewalls which block the connection.\n- `OtherError`: An error occurred while connecting to Franka World.",
+        "enum": [
+          "NoNetwork",
+          "NoGatewayConfigured",
+          "NoNameserverConfigured",
+          "LinkLocalAddress",
+          "NoGateway",
+          "NoNameserver",
+          "DNSLookupFailed",
+          "ConnectionRefused",
+          "NetworkUnreachable",
+          "NoRouteToHostStatic",
+          "NoRouteToHostDHCP",
+          "ConnectionTimedOut",
+          "OtherError"
+        ],
+        "type": "string"
+      },
+      "ChangeOperatingModeFailedDependency": {
+        "description": "Response if changing the operating mode failed.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "EmergencyStopPressed",
+            "ExternalEnablingDevicePressed"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeOperatingModeErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "ChangeOperatingModeRequest": {
+        "description": "Request for changing the operating mode.",
+        "example": {
+          "desiredOperatingMode": "Execution"
+        },
+        "properties": {
+          "desiredOperatingMode": {
+            "$ref": "#/components/schemas/DesiredOperatingMode"
+          }
+        },
+        "required": [
+          "desiredOperatingMode"
+        ],
+        "type": "object"
+      },
+      "DesiredOperatingMode": {
+        "description": "The desired operating mode.",
+        "enum": [
+          "Execution"
+        ],
+        "example": "Execution",
+        "type": "string"
+      },
+      "SoftwareState": {
+        "description": "Provides details about the installed software and available updates.",
+        "example": {
+          "availableUpdates": {
+            "add": [
+              {
+                "type": "SystemUpdate",
+                "version": "5.3.1"
+              }
+            ],
+            "factoryResetRequired": false,
+            "remove": [
+              {
+                "name": "1.0.0",
+                "type": "Feature",
+                "version": "example-feature-a"
+              },
+              {
+                "name": "1.0",
+                "type": "AppBundle",
+                "version": "example-app-bundle-a"
+              }
+            ],
+            "update": [
+              {
+                "name": "1.0",
+                "type": "AppBundle",
+                "version": "example-app-bundle-b"
+              },
+              {
+                "name": "1.0.0",
+                "type": "Feature",
+                "version": "example-feature-b"
+              }
+            ]
+          },
+          "installed": {
+            "appBundles": [
+              {
+                "appBundleName": "my-example-bundle",
+                "appBundleVersion": "1.0"
+              },
+              {
+                "appBundleName": "another-example-bundle",
+                "appBundleVersion": "1.1"
+              }
+            ],
+            "features": [
+              {
+                "featureName": "my-example-feature",
+                "featureVersion": "1.0.0"
+              },
+              {
+                "featureName": "my-second-feature",
+                "featureVersion": "3.7.0"
+              }
+            ],
+            "osVersion": "1.0.0"
+          },
+          "update": {
+            "add": [
+              {
+                "type": "SystemUpdate",
+                "version": "5.3.1"
+              }
+            ],
+            "factoryResetRequired": false,
+            "remove": [
+              {
+                "name": "1.0.0",
+                "type": "Feature",
+                "version": "example-feature-a"
+              },
+              {
+                "name": "1.0",
+                "type": "AppBundle",
+                "version": "example-app-bundle-a"
+              }
+            ],
+            "update": [
+              {
+                "name": "1.0",
+                "type": "AppBundle",
+                "version": "example-app-bundle-b"
+              },
+              {
+                "name": "1.0.0",
+                "type": "Feature",
+                "version": "example-feature-b"
+              }
+            ]
+          }
+        },
+        "properties": {
+          "availableUpdates": {
+            "$ref": "#/components/schemas/AvailableUpdates"
+          },
+          "installed": {
+            "$ref": "#/components/schemas/InstalledSoftware"
+          },
+          "update": {
+            "$ref": "#/components/schemas/PendingUpdates"
+          }
+        },
+        "required": [
+          "installed",
+          "availableUpdates",
+          "update"
+        ],
+        "type": "object"
+      },
+      "InstalledSoftware": {
+        "description": "The versions of the currently installed software, including the OS version, App bundle versions, and feature versions.",
+        "example": {
+          "appBundles": [
+            {
+              "appBundleName": "my-example-bundle",
+              "appBundleVersion": "1.0"
+            },
+            {
+              "appBundleName": "another-example-bundle",
+              "appBundleVersion": "1.1"
+            }
+          ],
+          "features": [
+            {
+              "featureName": "my-example-feature",
+              "featureVersion": "1.0.0"
+            },
+            {
+              "featureName": "my-second-feature",
+              "featureVersion": "3.7.0"
+            }
+          ],
+          "osVersion": "1.0.0"
+        },
+        "properties": {
+          "appBundles": {
+            "items": {
+              "$ref": "#/components/schemas/AppBundleVersion"
+            },
+            "type": "array"
+          },
+          "features": {
+            "items": {
+              "$ref": "#/components/schemas/FeatureVersion"
+            },
+            "type": "array"
+          },
+          "osVersion": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "osVersion",
+          "appBundles",
+          "features"
+        ],
+        "type": "object"
+      },
+      "AppBundleVersion": {
+        "description": "The version of the currently installed App bundle.",
+        "example": {
+          "appBundleName": "my-example-bundle",
+          "appBundleVersion": "1.0"
+        },
+        "properties": {
+          "appBundleName": {
+            "type": "string"
+          },
+          "appBundleVersion": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "appBundleName",
+          "appBundleVersion"
+        ],
+        "type": "object"
+      },
+      "FeatureVersion": {
+        "description": "The currently installed version of a feature.",
+        "example": {
+          "featureName": "my-example-feature",
+          "featureVersion": "1.0.0"
+        },
+        "properties": {
+          "featureName": {
+            "type": "string"
+          },
+          "featureVersion": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "featureName",
+          "featureVersion"
+        ],
+        "type": "object"
+      },
+      "AvailableUpdates": {
+        "description": "Lists the software updates available from Franka World. This list shows the differences between the currently installed software versions and the versions available for installation.",
+        "example": {
+          "add": [
+            {
+              "type": "SystemUpdate",
+              "version": "5.3.1"
+            }
+          ],
+          "factoryResetRequired": false,
+          "remove": [
+            {
+              "name": "1.0.0",
+              "type": "Feature",
+              "version": "example-feature-a"
+            },
+            {
+              "name": "1.0",
+              "type": "AppBundle",
+              "version": "example-app-bundle-a"
+            }
+          ],
+          "update": [
+            {
+              "name": "1.0",
+              "type": "AppBundle",
+              "version": "example-app-bundle-b"
+            },
+            {
+              "name": "1.0.0",
+              "type": "Feature",
+              "version": "example-feature-b"
+            }
+          ]
+        },
+        "properties": {
+          "add": {
+            "items": {
+              "$ref": "#/components/schemas/SoftwareVersionChange"
+            },
+            "type": "array"
+          },
+          "factoryResetRequired": {
+            "type": "boolean"
+          },
+          "remove": {
+            "items": {
+              "$ref": "#/components/schemas/SoftwareVersionChange"
+            },
+            "type": "array"
+          },
+          "update": {
+            "items": {
+              "$ref": "#/components/schemas/SoftwareVersionChange"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "add",
+          "remove",
+          "update",
+          "factoryResetRequired"
+        ],
+        "type": "object"
+      },
+      "SoftwareVersionChange": {
+        "description": "The version of a software component to be modified (installed, updated, or uninstalled). The software component can be a system update, a feature, or an App bundle.",
+        "example": {
+          "name": "1.0.0",
+          "type": "Feature",
+          "version": "example-feature-a"
+        },
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "SystemUpdate",
+              "Feature",
+              "AppBundle"
+            ],
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "version"
+        ],
+        "type": "object"
+      },
+      "PendingUpdates": {
+        "description": "The list of pending software updates to apply via the `update:apply` endpoint. This list shows the differences between the currently installed software versions and the versions to be installed.\n\nFor more details, refer to the documentation of [/api/system/software/update:apply](#/System/applySoftwareUpdate).",
+        "example": {
+          "add": [
+            {
+              "type": "SystemUpdate",
+              "version": "5.3.1"
+            }
+          ],
+          "factoryResetRequired": false,
+          "remove": [
+            {
+              "name": "1.0.0",
+              "type": "Feature",
+              "version": "example-feature-a"
+            },
+            {
+              "name": "1.0",
+              "type": "AppBundle",
+              "version": "example-app-bundle-a"
+            }
+          ],
+          "update": [
+            {
+              "name": "1.0",
+              "type": "AppBundle",
+              "version": "example-app-bundle-b"
+            },
+            {
+              "name": "1.0.0",
+              "type": "Feature",
+              "version": "example-feature-b"
+            }
+          ]
+        },
+        "properties": {
+          "add": {
+            "items": {
+              "$ref": "#/components/schemas/SoftwareVersionChange"
+            },
+            "type": "array"
+          },
+          "factoryResetRequired": {
+            "type": "boolean"
+          },
+          "remove": {
+            "items": {
+              "$ref": "#/components/schemas/SoftwareVersionChange"
+            },
+            "type": "array"
+          },
+          "update": {
+            "items": {
+              "$ref": "#/components/schemas/SoftwareVersionChange"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "add",
+          "remove",
+          "update",
+          "factoryResetRequired"
+        ],
+        "type": "object"
+      },
+      "StatusToken": {
+        "description": "A status file for reporting the current software status to Franka World. Retrieve the file from [/api/system/software/status-token](#/System/getSoftwareStatusToken) and upload it to Franka World to notify it about the current software status on the system.",
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
+      "SoftwareChanges": {
+        "description": "Shows the differences between the currently installed software and the software update.",
+        "example": {
+          "add": [
+            {
+              "type": "SystemUpdate",
+              "version": "5.3.1"
+            }
+          ],
+          "factoryResetRequired": false,
+          "remove": [
+            {
+              "name": "1.0.0",
+              "type": "Feature",
+              "version": "example-feature-a"
+            },
+            {
+              "name": "1.0",
+              "type": "AppBundle",
+              "version": "example-app-bundle-a"
+            }
+          ],
+          "update": [
+            {
+              "name": "1.0",
+              "type": "AppBundle",
+              "version": "example-app-bundle-b"
+            },
+            {
+              "name": "1.0.0",
+              "type": "Feature",
+              "version": "example-feature-b"
+            }
+          ]
+        },
+        "properties": {
+          "add": {
+            "items": {
+              "$ref": "#/components/schemas/SoftwareVersionChange"
+            },
+            "type": "array"
+          },
+          "factoryResetRequired": {
+            "description": "Indicates if a factory reset will occur when these changes are applied.",
+            "type": "boolean"
+          },
+          "remove": {
+            "items": {
+              "$ref": "#/components/schemas/SoftwareVersionChange"
+            },
+            "type": "array"
+          },
+          "update": {
+            "items": {
+              "$ref": "#/components/schemas/SoftwareVersionChange"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "add",
+          "remove",
+          "update",
+          "factoryResetRequired"
+        ],
+        "type": "object"
+      },
+      "UpdateFileException": {
+        "description": "Indicates that the update file is invalid or outdated. Please provide a valid and up-to-date update file.",
+        "example": {
+          "code": "UpdateFileOutdated",
+          "currentVersion": 2,
+          "updateFileVersion": 1
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "UpdateFileInvalid",
+              "UpdateFileOutdated"
+            ],
+            "type": "string"
+          },
+          "currentVersion": {
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "updateFileVersion": {
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "UpdateFile": {
+        "description": "The update file containing software updates for an offline update. Retrieve this file from Franka World and upload it when calling [/api/system/software/update:prepare-offline](#/System/prepareOfflineUpdate).",
+        "format": "binary",
+        "type": "string"
+      },
+      "ApplyChangesFailedDependency": {
+        "description": "Response if applying pending software updates failed.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "NoSoftwareUpdatesPending"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/ApplyChangesErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "ApplyChangesErrorCode": {
+        "description": "Error codes describing reasons for failing to apply pending software updates. This list may be extended in the future.\n\n`NoSoftwareUpdatesPending`: There are no pending software updates. Please first prepare the system for an update via [/api/system/software/update:prepare-online](#/System/prepareOnlineUpdate) or [/api/system/software/update:prepare-offline](#/System/prepareOfflineUpdate).",
+        "enum": [
+          "NoSoftwareUpdatesPending"
+        ],
+        "example": "NoSoftwareUpdatesPending",
+        "type": "string"
+      },
+      "FCIState": {
+        "description": "Provides information about the FCI state.",
+        "example": {
+          "status": "Active"
+        },
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/FCIStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "FCIStatus": {
+        "enum": [
+          "Active",
+          "Inactive"
+        ],
+        "type": "string"
+      },
+      "ActivateFCIFailedDependency": {
+        "description": "Response if activating FCI failed.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "FeatureNotInstalled"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/ActivateFCIErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "ActivateFCIErrorCode": {
+        "description": "Codes that describe possible reasons why activating FCI might not be possible. This list may be extended in the future.\n\n`MonitoredStandstill`: There is a safety enforced monitored standstill. \n\n`FeatureNotInstalled`: The required feature is not installed on this device. \n\n`WrongOperatingMode`: This call is only valid in operation mode Execution, please switch first. \n\n`BrakesClosed`: Brakes are closed. \n\n`LifetimeConfirmationNeeded`: Robot lifetime excess must be confirmed. \n\n`EmergencyStopPressed`: The emergency stop is pressed, please release it first. \n\n`RecoverableErrorActive`: Another recoverable error with a higher priority must be recovered first. \n\n`SafetySettingsUnvalidated`: Safety settings are unvalidated, please validate first.",
+        "enum": [
+          "MonitoredStandstill",
+          "FeatureNotInstalled",
+          "WrongOperatingMode",
+          "BrakesClosed",
+          "LifetimeConfirmationNeeded",
+          "EmergencyStopPressed",
+          "RecoverableErrorActive",
+          "SafetySettingsUnvalidated"
+        ],
+        "example": "MonitoredStandstill",
+        "type": "string"
+      },
+      "UnprocessableContent": {
+        "description": "Error response when applying a configuration fails due to an invalid configuration.",
+        "example": {
+          "code": "UnprocessableContent",
+          "message": "Overlapping network configuration, 192.168.1.1 is reserved"
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "UnprocessableContent"
+            ],
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "ConfigurationNormal": {
+        "description": "Specifies a system configuration. The top-level entries are optional. If omitted, the corresponding configurations remain unchanged. If an error occurs, the system does not roll back already changed configurations.",
+        "example": {
+          "endEffectorConfiguration": {
+            "endEffector": {
+              "name": "FrankaHand",
+              "params": {
+                "centerOfMass": {
+                  "x": -0.01,
+                  "y": 0,
+                  "z": 0.03
+                },
+                "inertia": {
+                  "x11": 0.001,
+                  "x12": 0,
+                  "x13": 0,
+                  "x22": 0.0025,
+                  "x23": 0,
+                  "x33": 0.0017
+                },
+                "mass": 0.73,
+                "transformation": {
+                  "rotation": {
+                    "pitch": 0,
+                    "roll": 0.7071,
+                    "yaw": 0
+                  },
+                  "translation": {
+                    "x": 0,
+                    "y": 0,
+                    "z": 0.1034
+                  }
+                }
+              }
+            }
+          },
+          "networkConfiguration": {
+            "robot": {
+              "network": "192.168.1.1"
+            },
+            "shopFloor": {
+              "type": "Dhcp"
+            }
+          },
+          "userConfiguration": {
+            "users": [
+              {
+                "name": "administrator",
+                "password": "someAdminPassword",
+                "role": "Admin"
+              },
+              {
+                "name": "user",
+                "password": "someUserPassword",
+                "role": "Operator"
+              }
+            ]
+          }
+        },
+        "properties": {
+          "endEffectorConfiguration": {
+            "$ref": "#/components/schemas/EndEffectorConfiguration"
+          },
+          "networkConfiguration": {
+            "$ref": "#/components/schemas/NetworkConfiguration"
+          },
+          "userConfiguration": {
+            "$ref": "#/components/schemas/UserConfiguration"
+          }
+        },
+        "type": "object"
+      },
+      "NetworkConfiguration": {
+        "description": "Specifies a configuration of the network of a robot system consisting of the shopfloor network (C2) and the robot network (X5).",
+        "example": {
+          "robot": {
+            "network": "192.168.1.1"
+          },
+          "shopFloor": {
+            "type": "Dhcp"
+          }
+        },
+        "properties": {
+          "robot": {
+            "$ref": "#/components/schemas/RobotNetwork"
+          },
+          "shopFloor": {
+            "$ref": "#/components/schemas/ShopFloorNetwork"
+          }
+        },
+        "required": [
+          "shopFloor",
+          "robot"
+        ],
+        "type": "object"
+      },
+      "ShopFloorNetwork": {
+        "description": "Specifies the network of the shopfloor (C2).\n\n`Static`: Shopfloor is configured to use statically assigned addresses. Requires address and netmask. Gateway and domain nameserver can optionally be specified. All must be valid IPv4 addresses.\n\n`Dhcp`: Shopfloor is configured to dynamically assign addresses (use DHCP).",
+        "example": {
+          "address": "192.168.0.123",
+          "netmask": "255.255.252.0",
+          "type": "Static"
+        },
+        "properties": {
+          "address": {
+            "$ref": "#/components/schemas/IPv4"
+          },
+          "dns": {
+            "$ref": "#/components/schemas/IPv4"
+          },
+          "gateway": {
+            "$ref": "#/components/schemas/IPv4"
+          },
+          "netmask": {
+            "$ref": "#/components/schemas/IPv4"
+          },
+          "type": {
+            "enum": [
+              "Dhcp",
+              "Static"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "IPv4": {
+        "description": "An address complying to Internet Protocol version 4.",
+        "example": "127.0.0.1",
+        "format": "ipv4",
+        "type": "string"
+      },
+      "RobotNetwork": {
+        "description": "Specifies the robot network (X5). Defines the IP address and the address range of the DHCP server running at the robot's base network interface. The network is fixed to a 24 bit network mask and the DHCP server assigns IP addresses with last octets in the range of 100 - 150.\n\nFor example, 192.168.1.1 would have the robot serve IP addresses 192.168.1.100 - 150 while all 192.168.1.x IP addresses can reach it.",
+        "example": {
+          "network": "192.168.1.1"
+        },
+        "properties": {
+          "network": {
+            "$ref": "#/components/schemas/IPv4"
+          }
+        },
+        "required": [
+          "network"
+        ],
+        "type": "object"
+      },
+      "EndEffectorConfiguration": {
+        "description": "Specifies the end effector configuration.",
+        "example": {
+          "endEffector": {
+            "name": "FrankaHand",
+            "params": {
+              "centerOfMass": {
+                "x": -0.01,
+                "y": 0,
+                "z": 0.03
+              },
+              "inertia": {
+                "x11": 0.001,
+                "x12": 0,
+                "x13": 0,
+                "x22": 0.0025,
+                "x23": 0,
+                "x33": 0.0017
+              },
+              "mass": 0.73,
+              "transformation": {
+                "rotation": {
+                  "pitch": 0,
+                  "roll": 0.7071,
+                  "yaw": 0
+                },
+                "translation": {
+                  "x": 0,
+                  "y": 0,
+                  "z": 0.1034
+                }
+              }
+            }
+          }
+        },
+        "properties": {
+          "endEffector": {
+            "$ref": "#/components/schemas/EndEffector"
+          }
+        },
+        "required": [
+          "endEffector"
+        ],
+        "type": "object"
+      },
+      "EndEffector": {
+        "description": "Specifies an end effector.\n\n`None`: No end effector is connected to the arm's flange.\n\n`FrankaHand`: The Franka hand gripper is connected to the arm's flange.\n\n`CobotPump`: The Schmalz cobot pump is connected to the arm's flange (this requires the corresponding feature to be installed).\n\n`GenericCan`: An end effector supporting CAN is connected to the arm's flange (this requires the corresponding feature to be installed). The endpoint [/api/end-effector/can](#/Generic%20CAN/wsEndEffectorCan) can then be used to open a bidirectional communication channel with the end effector via upgrade to websocket protocol.\n\n`Other`: Some other end effector is connected to the arm's flange.",
+        "example": {
+          "name": "FrankaHand",
+          "params": {
+            "centerOfMass": {
+              "x": -0.01,
+              "y": 0,
+              "z": 0.03
+            },
+            "inertia": {
+              "x11": 0.001,
+              "x12": 0,
+              "x13": 0,
+              "x22": 0.0025,
+              "x23": 0,
+              "x33": 0.0017
+            },
+            "mass": 0.73,
+            "transformation": {
+              "rotation": {
+                "pitch": 0,
+                "roll": 0.7071,
+                "yaw": 0
+              },
+              "translation": {
+                "x": 0,
+                "y": 0,
+                "z": 0.1034
+              }
+            }
+          }
+        },
+        "properties": {
+          "name": {
+            "enum": [
+              "None",
+              "FrankaHand",
+              "CobotPump",
+              "GenericCan",
+              "Other"
+            ],
+            "type": "string"
+          },
+          "params": {
+            "$ref": "#/components/schemas/EndEffectorParameters"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "EndEffectorParameters": {
+        "description": "Specifies the parameters of an end effector. The transformation must specify the transformation from flange to tool center point of the end effector. The center of mass must be set relative to the flange.\n\nIf the end effector mass is 0, then any nonzero inertia will be ignored. Hence, for consistentcy purposese the intertia tensor should set to 0 in this case.",
+        "example": {
+          "centerOfMass": {
+            "x": -0.01,
+            "y": 0,
+            "z": 0.03
+          },
+          "inertia": {
+            "x11": 0.001,
+            "x12": 0,
+            "x13": 0,
+            "x22": 0.0025,
+            "x23": 0,
+            "x33": 0.0017
+          },
+          "mass": 0.73,
+          "transformation": {
+            "rotation": {
+              "pitch": 0,
+              "roll": 0.7071,
+              "yaw": 0
+            },
+            "translation": {
+              "x": 0,
+              "y": 0,
+              "z": 0.1034
+            }
+          }
+        },
+        "properties": {
+          "centerOfMass": {
+            "$ref": "#/components/schemas/Translation"
+          },
+          "inertia": {
+            "$ref": "#/components/schemas/InertiaTensor"
+          },
+          "mass": {
+            "$ref": "#/components/schemas/Mass"
+          },
+          "transformation": {
+            "$ref": "#/components/schemas/Transformation"
+          }
+        },
+        "required": [
+          "mass",
+          "centerOfMass",
+          "transformation",
+          "inertia"
+        ],
+        "type": "object"
+      },
+      "Mass": {
+        "exclusiveMinimum": false,
+        "format": "double",
+        "minimum": 0,
+        "type": "number"
+      },
+      "Translation": {
+        "description": "Specifies a translation in 3-dimensional Cartesian space.",
+        "example": {
+          "x": 1,
+          "y": 1.5,
+          "z": -2.4
+        },
+        "properties": {
+          "x": {
+            "description": "The x-coordinate (in meters).",
+            "format": "double",
+            "type": "number"
+          },
+          "y": {
+            "description": "The y-coordinate (in meters).",
+            "format": "double",
+            "type": "number"
+          },
+          "z": {
+            "description": "The z-coordinate (in meters).",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "z"
+        ],
+        "type": "object"
+      },
+      "Transformation": {
+        "description": "Specifies a transformation in 3-dimensional space. The transformation is specified by roll-pitch-yaw angles and by a translation. Note that internally the rotation may be transformed to equivalent roll-pitch-yaw angles.",
+        "example": {
+          "rotation": {
+            "pitch": 0,
+            "roll": 0.7071,
+            "yaw": 0
+          },
+          "translation": {
+            "x": 0,
+            "y": 0,
+            "z": 0.1034
+          }
+        },
+        "properties": {
+          "rotation": {
+            "$ref": "#/components/schemas/Rotation3D"
+          },
+          "translation": {
+            "$ref": "#/components/schemas/Translation"
+          }
+        },
+        "required": [
+          "rotation",
+          "translation"
+        ],
+        "type": "object"
+      },
+      "Rotation3D": {
+        "description": "Specifies a rotation in 3-dimensional space. Assumes fixed axes xyz of the space frame and follows the [right-hand rule](https://en.wikipedia.org/wiki/Right-hand_rule) regarding axes/rotation orientation. Thus, a counter-clockwise rotation around the x-axis (roll) happens first, followed by a counter-clockwise rotation around the y-axis (pitch) and finally by a counter-clockwise rotation around the z-axis (yaw).",
+        "example": {
+          "pitch": 0,
+          "roll": 0.7071,
+          "yaw": 0
+        },
+        "properties": {
+          "pitch": {
+            "description": "The rotation around the y-axis (in radians).",
+            "format": "double",
+            "type": "number"
+          },
+          "roll": {
+            "description": "The rotation around the x-axis (in radians).",
+            "format": "double",
+            "type": "number"
+          },
+          "yaw": {
+            "description": "The rotation around the z-axis (in radians).",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "roll",
+          "pitch",
+          "yaw"
+        ],
+        "type": "object"
+      },
+      "InertiaTensor": {
+        "description": "Specifies the inertia tensor by means of a 3*3 matrix. Since the tensor is symmetric, only the upper half of the matrix has to bee specified.",
+        "example": {
+          "x11": 0.001,
+          "x12": 0,
+          "x13": 0,
+          "x22": 0.0025,
+          "x23": 0,
+          "x33": 0.0017
+        },
+        "properties": {
+          "x11": {
+            "description": "The matrix entry in row 1 and column 1.",
+            "format": "double",
+            "type": "number"
+          },
+          "x12": {
+            "description": "The matrix entry in row 1 and column 2.",
+            "format": "double",
+            "type": "number"
+          },
+          "x13": {
+            "description": "The matrix entry in row 1 and column 3.",
+            "format": "double",
+            "type": "number"
+          },
+          "x22": {
+            "description": "The matrix entry in row 2 and column 2.",
+            "format": "double",
+            "type": "number"
+          },
+          "x23": {
+            "description": "The matrix entry in row 2 and column 3.",
+            "format": "double",
+            "type": "number"
+          },
+          "x33": {
+            "description": "The matrix entry in row 3 and column 3.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x11",
+          "x12",
+          "x13",
+          "x22",
+          "x23",
+          "x33"
+        ],
+        "type": "object"
+      },
+      "UserConfiguration": {
+        "description": "Specifies the users.",
+        "example": {
+          "users": [
+            {
+              "name": "administrator",
+              "password": "someAdminPassword",
+              "role": "Admin"
+            },
+            {
+              "name": "user",
+              "password": "someUserPassword",
+              "role": "Operator"
+            }
+          ]
+        },
+        "properties": {
+          "users": {
+            "$ref": "#/components/schemas/Users"
+          }
+        },
+        "required": [
+          "users"
+        ],
+        "type": "object"
+      },
+      "Users": {
+        "description": "Specifies the users. Then names must be pairwise distinct. Furthermore, there must be at least one user with role \"Admin\".",
+        "example": [
+          {
+            "name": "administrator",
+            "password": "someAdminPassword",
+            "role": "Admin"
+          },
+          {
+            "name": "user",
+            "password": "someUserPassword",
+            "role": "Operator"
+          }
+        ],
+        "items": {
+          "$ref": "#/components/schemas/User"
+        },
+        "minItems": 1,
+        "type": "array"
+      },
+      "User": {
+        "description": "Specifies name, role and password of a user. The password is not set if the user is retrieved.",
+        "example": {
+          "name": "user",
+          "password": "someUserPassword",
+          "role": "Operator"
+        },
+        "properties": {
+          "name": {
+            "description": "The user's name.",
+            "type": "string"
+          },
+          "password": {
+            "$ref": "#/components/schemas/Password"
+          },
+          "role": {
+            "$ref": "#/components/schemas/RoleName"
+          }
+        },
+        "required": [
+          "name",
+          "role",
+          "password"
+        ],
+        "type": "object"
+      },
+      "RoleName": {
+        "description": "Describes the roles that define user authorization:\n\n`operator`: Has the most restricted access rights. Can start Tasks or activate FCI, for example.\n\n`safety-operator`: Required for configuring and recovering safety-related settings and errors. Can do everything an operator can do.\n\n`admin`: Required for non-safety related system configuration and all programming tasks. Can do everything an operator can do.\n\n",
+        "enum": [
+          "Operator",
+          "SafetyOperator",
+          "Admin"
+        ],
+        "example": "Admin",
+        "type": "string"
+      },
+      "Password": {
+        "description": "Specifies a user password. Passwords will not be shown and cannot be retrieved.",
+        "type": "string"
+      },
+      "ConfigurationFailedDependency": {
+        "description": "Response when setting the initial configuration fails.",
+        "example": {
+          "code": "ActionUnavailable",
+          "details": [
+            "SystemNotInFirstStart"
+          ]
+        },
+        "properties": {
+          "code": {
+            "enum": [
+              "ActionUnavailable"
+            ],
+            "type": "string"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/InitialConfigurationErrorCode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "details"
+        ],
+        "type": "object"
+      },
+      "InitialConfigurationErrorCode": {
+        "description": "Error codes describing why the initial configuration could not be applied. This list may be extended in the future.\n\n`SystemNotInFirstStart`: The initial configuration cannot be applied because the system is already configured.",
+        "enum": [
+          "SystemNotInFirstStart"
+        ],
+        "example": "SystemNotInFirstStart",
+        "type": "string"
+      },
+      "ConfigurationInitial": {
+        "description": "Specifies the initial system configuration. Set the user configuration. You may leave the other configurations empty. If not set, the following defaults apply:\n\n - The DHCP server for the robot network is set to 192.168.0.0/24, and DHCP is active for the shopfloor network\n\n - No end effector is selected\n\nIf an error occurs, the system does not roll back already changed configurations.",
+        "example": {
+          "endEffectorConfiguration": {
+            "endEffector": {
+              "name": "FrankaHand",
+              "params": {
+                "centerOfMass": {
+                  "x": -0.01,
+                  "y": 0,
+                  "z": 0.03
+                },
+                "inertia": {
+                  "x11": 0.001,
+                  "x12": 0,
+                  "x13": 0,
+                  "x22": 0.0025,
+                  "x23": 0,
+                  "x33": 0.0017
+                },
+                "mass": 0.73,
+                "transformation": {
+                  "rotation": {
+                    "pitch": 0,
+                    "roll": 0.7071,
+                    "yaw": 0
+                  },
+                  "translation": {
+                    "x": 0,
+                    "y": 0,
+                    "z": 0.1034
+                  }
+                }
+              }
+            }
+          },
+          "networkConfiguration": {
+            "robot": {
+              "network": "192.168.1.1"
+            },
+            "shopFloor": {
+              "type": "Dhcp"
+            }
+          },
+          "userConfiguration": {
+            "users": [
+              {
+                "name": "administrator",
+                "password": "someAdminPassword",
+                "role": "Admin"
+              },
+              {
+                "name": "user",
+                "password": "someUserPassword",
+                "role": "Operator"
+              }
+            ]
+          }
+        },
+        "properties": {
+          "endEffectorConfiguration": {
+            "$ref": "#/components/schemas/EndEffectorConfiguration"
+          },
+          "networkConfiguration": {
+            "$ref": "#/components/schemas/NetworkConfiguration"
+          },
+          "userConfiguration": {
+            "$ref": "#/components/schemas/UserConfiguration"
+          }
+        },
+        "required": [
+          "userConfiguration"
+        ],
+        "type": "object"
+      },
+      "GetConfiguration": {
+        "description": "Specifies a system configuration that can be retrieved via the [/api/system/configuration](#/System/getSystemConfiguration) endpoint. Note that the rotation in the end effector configuration's transformation may differ from the roll, pitch, yaw angles originally specified via [/api/system/configuration](#/System/changeSystemConfiguration). The returned angles are equivalent to the specified angles, resulting in the same rotation.",
+        "example": {
+          "endEffectorConfiguration": {
+            "endEffector": {
+              "name": "FrankaHand",
+              "params": {
+                "centerOfMass": {
+                  "x": -0.01,
+                  "y": 0,
+                  "z": 0.03
+                },
+                "inertia": {
+                  "x11": 0.001,
+                  "x12": 0,
+                  "x13": 0,
+                  "x22": 0.0025,
+                  "x23": 0,
+                  "x33": 0.0017
+                },
+                "mass": 0.73,
+                "transformation": {
+                  "rotation": {
+                    "pitch": 0,
+                    "roll": 0.7071,
+                    "yaw": 0
+                  },
+                  "translation": {
+                    "x": 0,
+                    "y": 0,
+                    "z": 0.1034
+                  }
+                }
+              }
+            }
+          },
+          "networkConfiguration": {
+            "robot": {
+              "network": "192.168.1.1"
+            },
+            "shopFloor": {
+              "type": "Dhcp"
+            }
+          },
+          "userConfiguration": {
+            "users": [
+              {
+                "name": "administrator",
+                "role": "Admin"
+              },
+              {
+                "name": "user",
+                "role": "Operator"
+              }
+            ]
+          }
+        },
+        "properties": {
+          "endEffectorConfiguration": {
+            "$ref": "#/components/schemas/EndEffectorConfiguration"
+          },
+          "networkConfiguration": {
+            "$ref": "#/components/schemas/NetworkConfiguration"
+          },
+          "userConfiguration": {
+            "$ref": "#/components/schemas/GetUserConfiguration"
+          }
+        },
+        "required": [
+          "networkConfiguration",
+          "endEffectorConfiguration",
+          "userConfiguration"
+        ],
+        "type": "object"
+      },
+      "GetUserConfiguration": {
+        "description": "Specifies the users.",
+        "example": {
+          "users": [
+            {
+              "name": "administrator",
+              "role": "Admin"
+            },
+            {
+              "name": "user",
+              "role": "Operator"
+            }
+          ]
+        },
+        "properties": {
+          "users": {
+            "$ref": "#/components/schemas/PresentUsers"
+          }
+        },
+        "required": [
+          "users"
+        ],
+        "type": "object"
+      },
+      "PresentUsers": {
+        "description": "Specifies the configured users.",
+        "example": [
+          {
+            "name": "administrator",
+            "role": "Admin"
+          },
+          {
+            "name": "user",
+            "role": "Operator"
+          }
+        ],
+        "items": {
+          "$ref": "#/components/schemas/UserWithoutPassword"
+        },
+        "minItems": 1,
+        "type": "array"
+      },
+      "UserWithoutPassword": {
+        "description": "Specifies name and role of a user.",
+        "example": {
+          "name": "user",
+          "role": "Operator"
+        },
+        "properties": {
+          "name": {
+            "description": "The user's name.",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/RoleName"
+          }
+        },
+        "required": [
+          "name",
+          "role"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "basicAuth": {
+        "scheme": "basic",
+        "type": "http"
+      }
+    }
+  },
+  "security": [
+    {
+      "basicAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "description": "All system-related functionality",
+      "name": "System"
+    },
+    {
+      "description": "All functionalities related to the robot arm",
+      "name": "Robot Arm"
+    },
+    {
+      "description": "All functionalities related to end effectors",
+      "name": "End Effector"
+    },
+    {
+      "description": "All functionalities related to single point of control",
+      "name": "SPoC"
+    },
+    {
+      "description": "All functionalities related to system configuration",
+      "name": "Configuration"
+    },
+    {
+      "description": "All functionalities related to the Franka control interface",
+      "name": "FCI"
+    },
+    {
+      "description": "All functionalities related to safety",
+      "name": "Safety"
+    },
+    {
+      "description": "All functionalities related to configuring safety rules",
+      "name": "Safety Configuration"
+    },
+    {
+      "description": "All functionalities related to recovering safety errors",
+      "name": "Safety Recovery"
+    },
+    {
+      "description": "All endpoints available in rescue mode. All other endpoints will return status code `503` in this mode.",
+      "name": "Rescue System"
+    }
+  ],
+  "openapi": "3.0.0"
+}

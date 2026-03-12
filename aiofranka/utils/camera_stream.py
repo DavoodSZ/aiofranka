@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Low-latency WebRTC camera streaming server with web terminal.
+Low-latency WebRTC camera streaming server.
 Streams cameras via WebRTC for minimal latency across long distances.
-Includes a web-based terminal for remote command execution.
 """
 
 import asyncio
@@ -17,12 +16,6 @@ from av import VideoFrame
 import fractions
 import time
 import threading
-import pty
-import os
-import select
-import struct
-import fcntl
-import termios
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("camera-stream")
@@ -366,119 +359,11 @@ async def on_shutdown(app):
 
 
 async def inject_js(request):
-    """Serve the injection script for Franka Desk."""
+    """Serve the injection script for Franka Desk (camera only, no terminal)."""
     script_path = "/home/younghyo/camera-stream/inject.js"
     with open(script_path, "r") as f:
         content = f.read()
     return web.Response(content_type="application/javascript", text=content)
-
-
-class WebTerminal:
-    """Manages a PTY terminal session over WebSocket."""
-    
-    def __init__(self, ws):
-        self.ws = ws
-        self.fd = None
-        self.pid = None
-        self.running = False
-        
-    async def start(self):
-        """Start the terminal session."""
-        # Fork a PTY
-        self.pid, self.fd = pty.fork()
-        
-        if self.pid == 0:
-            # Child process - exec shell
-            os.environ['TERM'] = 'xterm-256color'
-            os.environ['COLORTERM'] = 'truecolor'
-            os.chdir(os.path.expanduser('~'))
-            os.execlp('/bin/zsh', 'zsh', '-l')
-        else:
-            # Parent process
-            self.running = True
-            # Set non-blocking
-            flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
-            fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-            
-            # Start reading task
-            asyncio.create_task(self._read_output())
-            
-    async def _read_output(self):
-        """Read output from PTY and send to WebSocket."""
-        loop = asyncio.get_event_loop()
-        while self.running:
-            try:
-                # Check if there's data to read
-                r, _, _ = select.select([self.fd], [], [], 0.01)
-                if r:
-                    data = os.read(self.fd, 4096)
-                    if data:
-                        await self.ws.send_str(data.decode('utf-8', errors='replace'))
-                else:
-                    await asyncio.sleep(0.01)
-            except (OSError, IOError):
-                break
-            except Exception as e:
-                logger.error(f"Terminal read error: {e}")
-                break
-        
-    def write(self, data: str):
-        """Write input to the PTY."""
-        if self.fd:
-            try:
-                os.write(self.fd, data.encode('utf-8'))
-            except (OSError, IOError) as e:
-                logger.error(f"Terminal write error: {e}")
-                
-    def resize(self, rows: int, cols: int):
-        """Resize the PTY."""
-        if self.fd:
-            try:
-                winsize = struct.pack('HHHH', rows, cols, 0, 0)
-                fcntl.ioctl(self.fd, termios.TIOCSWINSZ, winsize)
-            except (OSError, IOError) as e:
-                logger.error(f"Terminal resize error: {e}")
-                
-    def stop(self):
-        """Stop the terminal session."""
-        self.running = False
-        if self.fd:
-            try:
-                os.close(self.fd)
-            except:
-                pass
-        if self.pid:
-            try:
-                os.kill(self.pid, 9)
-                os.waitpid(self.pid, 0)
-            except:
-                pass
-
-
-async def terminal_ws(request):
-    """WebSocket handler for terminal."""
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    
-    logger.info("Terminal WebSocket connected")
-    terminal = WebTerminal(ws)
-    await terminal.start()
-    
-    try:
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                data = json.loads(msg.data)
-                if data.get('type') == 'input':
-                    terminal.write(data.get('data', ''))
-                elif data.get('type') == 'resize':
-                    terminal.resize(data.get('rows', 24), data.get('cols', 80))
-            elif msg.type == aiohttp.WSMsgType.ERROR:
-                logger.error(f"Terminal WebSocket error: {ws.exception()}")
-    finally:
-        terminal.stop()
-        logger.info("Terminal WebSocket disconnected")
-    
-    return ws
 
 
 def main():
@@ -486,7 +371,7 @@ def main():
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
     app.router.add_get("/inject.js", inject_js)
-    app.router.add_get("/terminal", terminal_ws)
+    # NOTE: Terminal endpoint removed for security - was exposing shell access
     app.router.add_post("/offer/{cam_id}", offer)
     
     logger.info("Starting camera stream server on http://localhost:8890")

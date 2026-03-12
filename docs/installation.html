@@ -6,14 +6,14 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Installation &mdash; aiofranka 0.1.0 documentation</title>
+  <title>Installation &mdash; aiofranka 0.2.0 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
 
   
       <script src="_static/jquery.js?v=5d32c60e"></script>
       <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="_static/documentation_options.js?v=01f34227"></script>
+      <script src="_static/documentation_options.js?v=938c9ccc"></script>
       <script src="_static/doctools.js?v=9bcbadda"></script>
       <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="_static/js/theme.js"></script>
@@ -42,26 +42,35 @@
   </form>
 </div>
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
-              <p class="caption" role="heading"><span class="caption-text">Getting Started:</span></p>
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
 <ul class="current">
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Installation</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#system-requirements">System Requirements</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#installing-aiofranka">Installing aiofranka</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#from-pypi-recommended">From PyPI (Recommended)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#from-source">From Source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#optional-dependencies">Optional Dependencies</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#verifying-installation">Verifying Installation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#first-time-robot-setup">First-Time Robot Setup</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start</a></li>
 <li class="toctree-l1"><a class="reference internal" href="controllers.html">Controllers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="async_mode.html">Async Mode Guide</a></li>
 <li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="troubleshooting.html">Troubleshooting</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">API Reference:</span></p>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="api/robot.html">Robot Interface</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/remote.html">FrankaRemoteController (Server Mode)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/controller.html">Franka Controller</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/robot.html">Robot Interface</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/server.html">Server Functions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/gripper.html">GripperController</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/utilities.html">Async Utilities</a></li>
 </ul>
 
         </div>
@@ -94,8 +103,9 @@
 <h2>System Requirements<a class="headerlink" href="#system-requirements" title="Link to this heading"></a></h2>
 <ul class="simple">
 <li><p>Linux operating system (Ubuntu 20.04+ recommended)</p></li>
-<li><p>Real-time kernel</p></li>
+<li><p>Real-time kernel (for best 1kHz control loop performance)</p></li>
 <li><p>Network connection to Franka robot</p></li>
+<li><p>Python 3.8+</p></li>
 </ul>
 </section>
 <section id="installing-aiofranka">
@@ -116,6 +126,13 @@ pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </s
 </pre></div>
 </div>
 </section>
+<section id="optional-dependencies">
+<h3>Optional Dependencies<a class="headerlink" href="#optional-dependencies" title="Link to this heading"></a></h3>
+<p>For Robotiq gripper support:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;aiofranka[robotiq]&quot;</span>
+</pre></div>
+</div>
+</section>
 </section>
 <section id="verifying-installation">
 <h2>Verifying Installation<a class="headerlink" href="#verifying-installation" title="Link to this heading"></a></h2>
@@ -131,6 +148,23 @@ pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </s
 </pre></div>
 </div>
 <p>If this runs without errors, you’re ready to go!</p>
+</section>
+<section id="first-time-robot-setup">
+<h2>First-Time Robot Setup<a class="headerlink" href="#first-time-robot-setup" title="Link to this heading"></a></h2>
+<ol class="arabic">
+<li><p>Make sure you can access the Franka Desk GUI from your browser by navigating to the robot’s IP (e.g. <code class="docutils literal notranslate"><span class="pre">https://172.16.0.2</span></code>).</p></li>
+<li><p>Unlock the robot and activate FCI:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>aiofranka<span class="w"> </span>unlock<span class="w"> </span>--ip<span class="w"> </span><span class="m">172</span>.16.0.2
+</pre></div>
+</div>
+<p>You’ll be prompted for Franka Desk credentials on first use. They are saved to <code class="docutils literal notranslate"><span class="pre">~/.aiofranka/config.json</span></code> for subsequent use.</p>
+</li>
+<li><p>Verify the robot is ready:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>aiofranka<span class="w"> </span>status
+</pre></div>
+</div>
+</li>
+</ol>
 </section>
 </section>
 

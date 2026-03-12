@@ -6,12 +6,15 @@ sys.path.append(".")
 import threading
 import asyncio
 import time
+import logging
 from tqdm import trange
 from pathlib import Path
 import numpy as np 
 import time 
 from aiofranka.robot import RobotInterface
 from ruckig import InputParameter, Ruckig, Trajectory, Result
+
+logger = logging.getLogger(__name__)
 
 CUR_DIR = Path(__file__).parent.resolve()
 
@@ -116,7 +119,8 @@ class FrankaController:
         self.type = "impedance"
         self.running = False
         self.task = None
-        self.clip = True 
+        self.clip = True
+        self.error_callback = None  # Callback function(error_str) called on control loop exception
 
 
         self.kp, self.kd = np.ones(7) * 80, np.ones(7) * 4
@@ -168,15 +172,15 @@ class FrankaController:
         await asyncio.sleep(5)
         self.track = False
 
-    def initialize(self): 
+    def initialize(self):
 
-        # Get initial state
-        initial_state = self.robot.state
-        self.initial_ee = initial_state['ee']
-        self.initial_qpos = deepcopy(initial_state['qpos'])
-        self.initial_qvel = deepcopy(initial_state['qvel'])
+        # Read from already-synced MuJoCo state to avoid calling readOnce()
+        # concurrently with the active torque control loop (would drop TCP connection)
+        self.initial_qpos = deepcopy(self.robot.data.qpos)
+        self.initial_qvel = deepcopy(self.robot.data.qvel)
+        self.initial_ee = self.robot._ee()
 
-        self.q_desired= self.initial_qpos
+        self.q_desired = self.initial_qpos
         self.ee_desired = self.initial_ee
 
     def _update_desired(self, desired):
@@ -268,28 +272,28 @@ class FrankaController:
         """
         current_time = time.perf_counter()
         dt = 1.0 / self._update_freq
-        
+
         # Initialize tracking for this attribute if first time
         if attr not in self._last_update_time:
             self._last_update_time[attr] = current_time
-            # Sleep for the first update too to maintain consistent timing
-            await asyncio.sleep(dt)
             with self.state_lock:
                 setattr(self, attr, value)
+            await asyncio.sleep(dt)
             self._last_update_time[attr] = current_time + dt
             return
-        
+
         # Calculate target time for this update
         target_time = self._last_update_time[attr] + dt
-        
-        # Sleep until target time
+
+        # Set value immediately to minimize latency
+        with self.state_lock:
+            setattr(self, attr, value)
+
+        # Then sleep to rate-limit the next call
         sleep_time = target_time - current_time
         if sleep_time > 0:
             await asyncio.sleep(sleep_time)
-        
-        with self.state_lock:
-            setattr(self, attr, value)
-        
+
         # Update last update time to target (not actual) to avoid drift
         self._last_update_time[attr] = target_time
 
@@ -342,7 +346,14 @@ class FrankaController:
                     await asyncio.sleep(0)  # Yield control to event loop
         except Exception as e:
             self.running = False
-            print(f"Error in control loop: {e}")
+            error_str = str(e)
+            print(f"Error in control loop: {error_str}")
+            # Call error callback if set
+            if self.error_callback is not None:
+                try:
+                    self.error_callback(error_str)
+                except Exception as cb_err:
+                    print(f"Error in error_callback: {cb_err}")
             # diff = (self.torque - self.last_torque)/1e-3
             # diff = np.abs(diff)
 
@@ -384,7 +395,7 @@ class FrankaController:
             - Check terminal for error messages if robot stops unexpectedly
         """
 
-        print("starting robot!")
+        logger.info("Starting robot control loop")
         self.robot.start()
 
         if self.task is None or self.task.done():
@@ -474,7 +485,7 @@ class FrankaController:
             print(f"Switched to {controller_type} controller.")
             print("==================================")
 
-    def step(self): 
+    def step(self):
         self.state = self.robot.state
         if self.type == "impedance":
             self._impedance_step(self.state)
@@ -671,14 +682,10 @@ class FrankaController:
             - May fail if target is at joint limits or in collision
         """
         self.type = "impedance"
-        print("setting impedance controller for move...")
 
         inp = InputParameter(7)
-
-        print('getting current state for ruckig...')
         inp.current_position = self.robot.state['qpos']
         inp.current_velocity = self.robot.state['qvel']
-        print("got current state")
         inp.current_acceleration = np.zeros(7)
 
         inp.target_position = np.array(qpos)
@@ -686,25 +693,25 @@ class FrankaController:
         inp.target_acceleration = np.zeros(7)
 
         inp.max_velocity = np.ones(7) * 10
-        inp.max_acceleration = np.ones(7) * 5 
+        inp.max_acceleration = np.ones(7) * 5
         inp.max_jerk = np.ones(7)
-
-        print("set input parameters for ruckig")
         
         otg = Ruckig(7)
         trajectory = Trajectory(7)
 
-        print("calculating trajectory...")
-        result = otg.calculate(inp, trajectory)
-
-        print(f"Generated trajectory with result: {result}")
-        print(trajectory.duration * 50)
+        otg.calculate(inp, trajectory)
 
         # create a trajectory to the desired qpos  (linear interpolation)
-        for i in range(int(trajectory.duration * 50)):
-            print(i, trajectory.duration * 50)
+        n_steps = int(trajectory.duration * 50)
+        eta_total = trajectory.duration
+        for i in range(n_steps):
             q_desired, _, _ = trajectory.at_time(i / 50.0)
             await self.set("q_desired", q_desired)
+            done = (i + 1) * 20 // n_steps
+            bar = "█" * done + "░" * (20 - done)
+            eta = eta_total - (i + 1) / 50.0
+            print(f"\r  Moving [{bar}] {(i + 1) * 100 // n_steps}% ETA {eta:.1f}s", end="", flush=True)
+        print()
 
         # await self.stabilize()
 

@@ -43,18 +43,13 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../installation.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../quickstart.html">Quick Start</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../examples.html">Examples</a></li>
-</ul>
-<p class="caption" role="heading"><span class="caption-text">User Guide:</span></p>
-<ul>
 <li class="toctree-l1"><a class="reference internal" href="../../controllers.html">Controllers</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../troubleshooting.html">Troubleshooting</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples.html">Examples</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference:</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../api/robot.html">Robot Interface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../api/controller.html">Franka Controller</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../api/client.html">Client</a></li>
 </ul>
 
         </div>
@@ -239,11 +234,11 @@
         <span class="n">mujoco</span><span class="o">.</span><span class="n">mj_forward</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="p">)</span></div>
 
 
-    <span class="nd">@property</span> 
-    <span class="k">def</span><span class="w"> </span><span class="nf">state</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span> 
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">state</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">        Get current robot state with kinematics and dynamics.</span>
-<span class="sd">        </span>
+
 <span class="sd">        Returns:</span>
 <span class="sd">            dict: Dictionary containing:</span>
 <span class="sd">                - qpos (np.ndarray): Joint positions [rad] (7,)</span>
@@ -253,11 +248,11 @@
 <span class="sd">                - jac (np.ndarray): End-effector Jacobian (6, 7) - [linear; angular]</span>
 <span class="sd">                - mm (np.ndarray): Joint-space mass matrix (7, 7)</span>
 <span class="sd">                - last_torque (np.ndarray): Last commanded torques [Nm] (7,)</span>
-<span class="sd">                </span>
+
 <span class="sd">        Note:</span>
 <span class="sd">            State is synchronized from real robot on every access. MuJoCo model</span>
 <span class="sd">            is updated with latest robot state before computing kinematics/dynamics.</span>
-<span class="sd">            </span>
+
 <span class="sd">        Example:</span>
 <span class="sd">            &gt;&gt;&gt; state = robot.state</span>
 <span class="sd">            &gt;&gt;&gt; print(f&quot;Joint 1 position: {state[&#39;qpos&#39;][0]:.3f} rad&quot;)</span>
@@ -265,19 +260,53 @@
 <span class="sd">            &gt;&gt;&gt; print(f&quot;EE orientation: {state[&#39;ee&#39;][:3, :3]}&quot;)</span>
 <span class="sd">        &quot;&quot;&quot;</span>
 
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">real</span><span class="p">:</span> 
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">real</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">sync_mj</span><span class="p">()</span>
 
-        <span class="n">state</span> <span class="o">=</span> <span class="p">{</span> 
+        <span class="n">state</span> <span class="o">=</span> <span class="p">{</span>
             <span class="s2">&quot;qpos&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">qpos</span><span class="p">),</span>
-            <span class="s2">&quot;qvel&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">qvel</span><span class="p">),</span> 
+            <span class="s2">&quot;qvel&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">qvel</span><span class="p">),</span>
             <span class="s2">&quot;ee&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ee</span><span class="p">(),</span>
             <span class="s2">&quot;jac&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_jacobian</span><span class="p">(),</span>
-            <span class="s2">&quot;mm&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mass_matrix</span><span class="p">(),</span> 
+            <span class="s2">&quot;mm&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mass_matrix</span><span class="p">(),</span>
             <span class="s2">&quot;last_torque&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">ctrl</span><span class="p">),</span>
         <span class="p">}</span>
 
-        <span class="k">return</span> <span class="n">state</span> 
+        <span class="k">return</span> <span class="n">state</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">state_minimal</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get minimal robot state (fast, no kinematics/dynamics computation).</span>
+
+<span class="sd">        Use this for impedance/PID control where Jacobian and mass matrix</span>
+<span class="sd">        are not needed. ~10x faster than full state property.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            dict: Dictionary containing only:</span>
+<span class="sd">                - qpos (np.ndarray): Joint positions [rad] (7,)</span>
+<span class="sd">                - qvel (np.ndarray): Joint velocities [rad/s] (7,)</span>
+<span class="sd">                - last_torque (np.ndarray): Last commanded torques [Nm] (7,)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">real</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">torque_controller</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">robot_state</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">robot</span><span class="o">.</span><span class="n">read_once</span><span class="p">()</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">robot_state</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">torque_controller</span><span class="o">.</span><span class="n">readOnce</span><span class="p">()</span>
+
+            <span class="k">return</span> <span class="p">{</span>
+                <span class="s2">&quot;qpos&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">robot_state</span><span class="o">.</span><span class="n">q</span><span class="p">),</span>
+                <span class="s2">&quot;qvel&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">robot_state</span><span class="o">.</span><span class="n">dq</span><span class="p">),</span>
+                <span class="s2">&quot;last_torque&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">robot_state</span><span class="o">.</span><span class="n">tau_J_d</span><span class="p">),</span>
+            <span class="p">}</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="c1"># Simulation: still need mj_forward for accurate velocities</span>
+            <span class="n">mujoco</span><span class="o">.</span><span class="n">mj_forward</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="p">)</span>
+            <span class="k">return</span> <span class="p">{</span>
+                <span class="s2">&quot;qpos&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">qpos</span><span class="p">),</span>
+                <span class="s2">&quot;qvel&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">qvel</span><span class="p">),</span>
+                <span class="s2">&quot;last_torque&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">ctrl</span><span class="p">),</span>
+            <span class="p">}</span> 
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_mass_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span> 
 <span class="w">        </span><span class="sd">&quot;&quot;&quot; Compute mass matrix at current state &quot;&quot;&quot;</span>

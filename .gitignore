@@ -36,3 +36,7 @@ plot_heatmap.py
 sysid_script.sh
 test_K128_D8.png
 test.png
+demos/
+
+rss2026/
+checkpoints/

@@ -141,11 +141,11 @@ class RobotInterface:
         self.data.ctrl = np.array(robot_state.tau_J_d)
         mujoco.mj_forward(self.model, self.data)
 
-    @property 
-    def state(self): 
+    @property
+    def state(self):
         """
         Get current robot state with kinematics and dynamics.
-        
+
         Returns:
             dict: Dictionary containing:
                 - qpos (np.ndarray): Joint positions [rad] (7,)
@@ -155,11 +155,11 @@ class RobotInterface:
                 - jac (np.ndarray): End-effector Jacobian (6, 7) - [linear; angular]
                 - mm (np.ndarray): Joint-space mass matrix (7, 7)
                 - last_torque (np.ndarray): Last commanded torques [Nm] (7,)
-                
+
         Note:
             State is synchronized from real robot on every access. MuJoCo model
             is updated with latest robot state before computing kinematics/dynamics.
-            
+
         Example:
             >>> state = robot.state
             >>> print(f"Joint 1 position: {state['qpos'][0]:.3f} rad")
@@ -167,19 +167,53 @@ class RobotInterface:
             >>> print(f"EE orientation: {state['ee'][:3, :3]}")
         """
 
-        if self.real: 
+        if self.real:
             self.sync_mj()
 
-        state = { 
+        state = {
             "qpos": np.array(self.data.qpos),
-            "qvel": np.array(self.data.qvel), 
+            "qvel": np.array(self.data.qvel),
             "ee": self._ee(),
             "jac": self._jacobian(),
-            "mm": self._mass_matrix(), 
+            "mm": self._mass_matrix(),
             "last_torque": np.array(self.data.ctrl),
         }
 
-        return state 
+        return state
+
+    @property
+    def state_minimal(self):
+        """
+        Get minimal robot state (fast, no kinematics/dynamics computation).
+
+        Use this for impedance/PID control where Jacobian and mass matrix
+        are not needed. ~10x faster than full state property.
+
+        Returns:
+            dict: Dictionary containing only:
+                - qpos (np.ndarray): Joint positions [rad] (7,)
+                - qvel (np.ndarray): Joint velocities [rad/s] (7,)
+                - last_torque (np.ndarray): Last commanded torques [Nm] (7,)
+        """
+        if self.real:
+            if self.torque_controller is None:
+                robot_state = self.robot.read_once()
+            else:
+                robot_state, _ = self.torque_controller.readOnce()
+
+            return {
+                "qpos": np.array(robot_state.q),
+                "qvel": np.array(robot_state.dq),
+                "last_torque": np.array(robot_state.tau_J_d),
+            }
+        else:
+            # Simulation: still need mj_forward for accurate velocities
+            mujoco.mj_forward(self.model, self.data)
+            return {
+                "qpos": np.array(self.data.qpos),
+                "qvel": np.array(self.data.qvel),
+                "last_torque": np.array(self.data.ctrl),
+            } 
 
     def _mass_matrix(self): 
         """ Compute mass matrix at current state """

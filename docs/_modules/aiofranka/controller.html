@@ -85,12 +85,15 @@
 <span class="kn">import</span><span class="w"> </span><span class="nn">threading</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">tqdm</span><span class="w"> </span><span class="kn">import</span> <span class="n">trange</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span> 
 <span class="kn">import</span><span class="w"> </span><span class="nn">time</span> 
 <span class="kn">from</span><span class="w"> </span><span class="nn">aiofranka.robot</span><span class="w"> </span><span class="kn">import</span> <span class="n">RobotInterface</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">ruckig</span><span class="w"> </span><span class="kn">import</span> <span class="n">InputParameter</span><span class="p">,</span> <span class="n">Ruckig</span><span class="p">,</span> <span class="n">Trajectory</span><span class="p">,</span> <span class="n">Result</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
 
 <span class="n">CUR_DIR</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
 
@@ -199,7 +202,8 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">type</span> <span class="o">=</span> <span class="s2">&quot;impedance&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">running</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">task</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">clip</span> <span class="o">=</span> <span class="kc">True</span> 
+        <span class="bp">self</span><span class="o">.</span><span class="n">clip</span> <span class="o">=</span> <span class="kc">True</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">error_callback</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># Callback function(error_str) called on control loop exception</span>
 
 
         <span class="bp">self</span><span class="o">.</span><span class="n">kp</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">kd</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span> <span class="o">*</span> <span class="mi">80</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span> <span class="o">*</span> <span class="mi">4</span>
@@ -211,13 +215,16 @@
 
         <span class="bp">self</span><span class="o">.</span><span class="n">track</span> <span class="o">=</span> <span class="kc">False</span> 
         <span class="bp">self</span><span class="o">.</span><span class="n">torque_diff_limit</span> <span class="o">=</span> <span class="mf">990.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">torque_limit</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="mi">87</span><span class="p">,</span> <span class="mi">87</span><span class="p">,</span> <span class="mi">87</span><span class="p">,</span> <span class="mi">87</span><span class="p">,</span> <span class="mi">12</span><span class="p">,</span> <span class="mi">12</span><span class="p">,</span> <span class="mi">12</span><span class="p">])</span>  <span class="c1"># Nm</span>
         
         <span class="c1"># Rate limiting for .set() method</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_update_freq</span> <span class="o">=</span> <span class="mf">50.0</span>  <span class="c1"># Default 50Hz</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_last_update_time</span> <span class="o">=</span> <span class="p">{}</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_pending_updates</span> <span class="o">=</span> <span class="p">{}</span>
 
-        <span class="bp">self</span><span class="o">.</span><span class="n">state</span> <span class="o">=</span> <span class="kc">None</span> </div>
+        <span class="bp">self</span><span class="o">.</span><span class="n">state</span> <span class="o">=</span> <span class="kc">None</span> 
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">verbose</span> <span class="o">=</span> <span class="kc">False</span></div>
 
 
 
@@ -254,15 +261,15 @@
 
 <div class="viewcode-block" id="FrankaController.initialize">
 <a class="viewcode-back" href="../../api/controller.html#aiofranka.controller.FrankaController.initialize">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">initialize</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span> 
+    <span class="k">def</span><span class="w"> </span><span class="nf">initialize</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
 
-        <span class="c1"># Get initial state</span>
-        <span class="n">initial_state</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">robot</span><span class="o">.</span><span class="n">state</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">initial_ee</span> <span class="o">=</span> <span class="n">initial_state</span><span class="p">[</span><span class="s1">&#39;ee&#39;</span><span class="p">]</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">initial_qpos</span> <span class="o">=</span> <span class="n">deepcopy</span><span class="p">(</span><span class="n">initial_state</span><span class="p">[</span><span class="s1">&#39;qpos&#39;</span><span class="p">])</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">initial_qvel</span> <span class="o">=</span> <span class="n">deepcopy</span><span class="p">(</span><span class="n">initial_state</span><span class="p">[</span><span class="s1">&#39;qvel&#39;</span><span class="p">])</span>
+        <span class="c1"># Read from already-synced MuJoCo state to avoid calling readOnce()</span>
+        <span class="c1"># concurrently with the active torque control loop (would drop TCP connection)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">initial_qpos</span> <span class="o">=</span> <span class="n">deepcopy</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">robot</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">qpos</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">initial_qvel</span> <span class="o">=</span> <span class="n">deepcopy</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">robot</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">qvel</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">initial_ee</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">robot</span><span class="o">.</span><span class="n">_ee</span><span class="p">()</span>
 
-        <span class="bp">self</span><span class="o">.</span><span class="n">q_desired</span><span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">initial_qpos</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">q_desired</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">initial_qpos</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">ee_desired</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">initial_ee</span></div>
 
 
@@ -360,27 +367,28 @@
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">current_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
         <span class="n">dt</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">_update_freq</span>
-        
+
         <span class="c1"># Initialize tracking for this attribute if first time</span>
         <span class="k">if</span> <span class="n">attr</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_update_time</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_last_update_time</span><span class="p">[</span><span class="n">attr</span><span class="p">]</span> <span class="o">=</span> <span class="n">current_time</span>
-            <span class="c1"># Sleep for the first update too to maintain consistent timing</span>
-            <span class="k">await</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">dt</span><span class="p">)</span>
             <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">state_lock</span><span class="p">:</span>
                 <span class="nb">setattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+            <span class="k">await</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">dt</span><span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_last_update_time</span><span class="p">[</span><span class="n">attr</span><span class="p">]</span> <span class="o">=</span> <span class="n">current_time</span> <span class="o">+</span> <span class="n">dt</span>
             <span class="k">return</span>
-        
+
         <span class="c1"># Calculate target time for this update</span>
         <span class="n">target_time</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_update_time</span><span class="p">[</span><span class="n">attr</span><span class="p">]</span> <span class="o">+</span> <span class="n">dt</span>
-        
-        <span class="c1"># Sleep until target time</span>
+
+        <span class="c1"># Set value immediately to minimize latency</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">state_lock</span><span class="p">:</span>
+            <span class="nb">setattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+
+        <span class="c1"># Then sleep to rate-limit the next call</span>
         <span class="n">sleep_time</span> <span class="o">=</span> <span class="n">target_time</span> <span class="o">-</span> <span class="n">current_time</span>
         <span class="k">if</span> <span class="n">sleep_time</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
             <span class="k">await</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">sleep_time</span><span class="p">)</span>
-        
-        <span class="nb">setattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
-        
+
         <span class="c1"># Update last update time to target (not actual) to avoid drift</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_last_update_time</span><span class="p">[</span><span class="n">attr</span><span class="p">]</span> <span class="o">=</span> <span class="n">target_time</span></div>
 
@@ -434,7 +442,14 @@
                     <span class="k">await</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>  <span class="c1"># Yield control to event loop</span>
         <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">running</span> <span class="o">=</span> <span class="kc">False</span>
-            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Error in control loop: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="n">error_str</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">e</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Error in control loop: </span><span class="si">{</span><span class="n">error_str</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="c1"># Call error callback if set</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">error_callback</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">error_callback</span><span class="p">(</span><span class="n">error_str</span><span class="p">)</span>
+                <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">cb_err</span><span class="p">:</span>
+                    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Error in error_callback: </span><span class="si">{</span><span class="n">cb_err</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
             <span class="c1"># diff = (self.torque - self.last_torque)/1e-3</span>
             <span class="c1"># diff = np.abs(diff)</span>
 
@@ -478,7 +493,7 @@
 <span class="sd">            - Check terminal for error messages if robot stops unexpectedly</span>
 <span class="sd">        &quot;&quot;&quot;</span>
 
-        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;starting robot!&quot;</span><span class="p">)</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;Starting robot control loop&quot;</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">robot</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">task</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">task</span><span class="o">.</span><span class="n">done</span><span class="p">():</span>
@@ -567,12 +582,17 @@
         <span class="c1"># Reset integral term when switching controllers</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">error_integral</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
         <span class="c1"># Reset timing state when switching controllers</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_last_update_time</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span></div>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_last_update_time</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">verbose</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;==================================&quot;</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Switched to </span><span class="si">{</span><span class="n">controller_type</span><span class="si">}</span><span class="s2"> controller.&quot;</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;==================================&quot;</span><span class="p">)</span></div>
 
 
 <div class="viewcode-block" id="FrankaController.step">
 <a class="viewcode-back" href="../../api/controller.html#aiofranka.controller.FrankaController.step">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span> 
+    <span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">state</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">robot</span><span class="o">.</span><span class="n">state</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;impedance&quot;</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_impedance_step</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">state</span><span class="p">)</span>
@@ -719,6 +739,8 @@
             <span class="n">diff</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">clip</span><span class="p">(</span><span class="n">diff</span><span class="p">,</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">torque_diff_limit</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">torque_diff_limit</span><span class="p">)</span>
             <span class="n">tau_d</span> <span class="o">=</span> <span class="n">last_torque</span> <span class="o">+</span> <span class="n">diff</span> <span class="o">*</span> <span class="mf">1e-3</span>
 
+            <span class="n">tau_d</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">clip</span><span class="p">(</span><span class="n">tau_d</span><span class="p">,</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">torque_limit</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">torque_limit</span><span class="p">)</span>
+
         <span class="bp">self</span><span class="o">.</span><span class="n">torque</span> <span class="o">=</span> <span class="n">tau_d</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">robot</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">tau_d</span><span class="p">)</span>
@@ -772,7 +794,6 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">type</span> <span class="o">=</span> <span class="s2">&quot;impedance&quot;</span>
 
         <span class="n">inp</span> <span class="o">=</span> <span class="n">InputParameter</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
-
         <span class="n">inp</span><span class="o">.</span><span class="n">current_position</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">robot</span><span class="o">.</span><span class="n">state</span><span class="p">[</span><span class="s1">&#39;qpos&#39;</span><span class="p">]</span>
         <span class="n">inp</span><span class="o">.</span><span class="n">current_velocity</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">robot</span><span class="o">.</span><span class="n">state</span><span class="p">[</span><span class="s1">&#39;qvel&#39;</span><span class="p">]</span>
         <span class="n">inp</span><span class="o">.</span><span class="n">current_acceleration</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
@@ -782,18 +803,25 @@
         <span class="n">inp</span><span class="o">.</span><span class="n">target_acceleration</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
 
         <span class="n">inp</span><span class="o">.</span><span class="n">max_velocity</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span> <span class="o">*</span> <span class="mi">10</span>
-        <span class="n">inp</span><span class="o">.</span><span class="n">max_acceleration</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span> <span class="o">*</span> <span class="mi">5</span> 
+        <span class="n">inp</span><span class="o">.</span><span class="n">max_acceleration</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span> <span class="o">*</span> <span class="mi">5</span>
         <span class="n">inp</span><span class="o">.</span><span class="n">max_jerk</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
         
         <span class="n">otg</span> <span class="o">=</span> <span class="n">Ruckig</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
         <span class="n">trajectory</span> <span class="o">=</span> <span class="n">Trajectory</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
 
-        <span class="n">result</span> <span class="o">=</span> <span class="n">otg</span><span class="o">.</span><span class="n">calculate</span><span class="p">(</span><span class="n">inp</span><span class="p">,</span> <span class="n">trajectory</span><span class="p">)</span>
+        <span class="n">otg</span><span class="o">.</span><span class="n">calculate</span><span class="p">(</span><span class="n">inp</span><span class="p">,</span> <span class="n">trajectory</span><span class="p">)</span>
 
         <span class="c1"># create a trajectory to the desired qpos  (linear interpolation)</span>
-        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">trajectory</span><span class="o">.</span><span class="n">duration</span> <span class="o">*</span> <span class="mi">50</span><span class="p">)):</span>
+        <span class="n">n_steps</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">trajectory</span><span class="o">.</span><span class="n">duration</span> <span class="o">*</span> <span class="mi">50</span><span class="p">)</span>
+        <span class="n">eta_total</span> <span class="o">=</span> <span class="n">trajectory</span><span class="o">.</span><span class="n">duration</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_steps</span><span class="p">):</span>
             <span class="n">q_desired</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">trajectory</span><span class="o">.</span><span class="n">at_time</span><span class="p">(</span><span class="n">i</span> <span class="o">/</span> <span class="mf">50.0</span><span class="p">)</span>
-            <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;q_desired&quot;</span><span class="p">,</span> <span class="n">q_desired</span><span class="p">)</span></div>
+            <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;q_desired&quot;</span><span class="p">,</span> <span class="n">q_desired</span><span class="p">)</span>
+            <span class="n">done</span> <span class="o">=</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="mi">20</span> <span class="o">//</span> <span class="n">n_steps</span>
+            <span class="n">bar</span> <span class="o">=</span> <span class="s2">&quot;█&quot;</span> <span class="o">*</span> <span class="n">done</span> <span class="o">+</span> <span class="s2">&quot;░&quot;</span> <span class="o">*</span> <span class="p">(</span><span class="mi">20</span> <span class="o">-</span> <span class="n">done</span><span class="p">)</span>
+            <span class="n">eta</span> <span class="o">=</span> <span class="n">eta_total</span> <span class="o">-</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="mf">50.0</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="se">\r</span><span class="s2">  Moving [</span><span class="si">{</span><span class="n">bar</span><span class="si">}</span><span class="s2">] </span><span class="si">{</span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="o">//</span><span class="w"> </span><span class="n">n_steps</span><span class="si">}</span><span class="s2">% ETA </span><span class="si">{</span><span class="n">eta</span><span class="si">:</span><span class="s2">.1f</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">()</span></div>
 </div>
 
 
