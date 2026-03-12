@@ -27,6 +27,34 @@ _REMOTE_ATTRS = {
     "q_desired", "ee_desired", "torque",
 }
 
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_RST = "\033[0m"
+
+
+class ServerDiedError(RuntimeError):
+    """Raised when the server process dies (e.g. reflex error).
+
+    Attributes:
+        server_error: The error message from the server (e.g. libfranka reflex details).
+    """
+    def __init__(self, server_error: str):
+        self.server_error = server_error
+        # Build a user-friendly message
+        lines = [
+            f"\n  {_RED}Server died:{_RST} {server_error}\n",
+        ]
+        if "reflex" in server_error.lower():
+            lines.append(f"  The robot entered {_BOLD}Reflex{_RST} mode (safety stop).")
+            lines.append(f"  This usually means the robot hit a joint/velocity/torque limit.\n")
+        lines.append(f"  To recover:")
+        lines.append(f"    1. Run {_BOLD}aiofranka gravcomp{_RST} to freely move the robot")
+        lines.append(f"       to a safe configuration, then Ctrl+C and restart your script.")
+        lines.append(f"    2. Or just restart your script (it will auto-recover if possible).\n")
+        super().__init__("\n".join(lines))
+
 
 class FrankaRemoteController:
     """
@@ -75,51 +103,33 @@ class FrankaRemoteController:
         via shared memory and ZMQ. The subprocess terminates automatically
         when this script exits.
 
-        The robot must already be unlocked with FCI active. If not, prints
-        a status summary and raises RuntimeError.
+        The robot must already be unlocked with FCI active (via
+        ``aiofranka.unlock()`` or the Franka Desk web GUI). If not, the
+        server subprocess will fail to start and a helpful error message
+        is printed.
 
         Raises:
-            RuntimeError: If the robot is not ready or the server fails to start.
+            RuntimeError: If the server fails to start.
         """
-        from aiofranka.server import start_subprocess, _resolve_from_config, _DeskClientV2
+        from aiofranka.server import start_subprocess
 
-        _BOLD = "\033[1m"
-        _DIM = "\033[2m"
         _GREEN = "\033[32m"
-        _YELLOW = "\033[33m"
-        _RED = "\033[31m"
-        _RST = "\033[0m"
 
         print(f"\n  {_BOLD}aiofranka{_RST} {_DIM}|{_RST} "
               f"starting server {_DIM}({self.robot_ip}){_RST}\n")
 
-        # Pre-check: is the robot ready?
+        # Spawn server subprocess (no homing — user script controls movement)
         try:
-            ip, username, password = _resolve_from_config(
-                self.robot_ip, None, None, interactive=False)
-            probe = _DeskClientV2(ip, username, password)
-            joints_ok = probe.are_joints_unlocked()
-            fci_ok = probe.is_fci_active()
-
-            j_status = f"{_GREEN}unlocked{_RST}" if joints_ok else f"{_RED}locked{_RST}"
-            f_status = f"{_GREEN}active{_RST}" if fci_ok else f"{_RED}inactive{_RST}"
-            print(f"    Joints ........... {j_status}")
-            print(f"    FCI .............. {f_status}")
-            print()
-
-            if not joints_ok or not fci_ok:
+            self._server_proc = start_subprocess(self.robot_ip)
+        except RuntimeError as e:
+            err = str(e).lower()
+            if "unlock" in err or "fci" in err or "joint" in err or "not ready" in err:
                 print(f"  {_RED}Robot is not ready.{_RST} Unlock first:\n")
                 print(f"  Add to your script before {_BOLD}ctrl.start(){_RST}:")
                 print(f"    {_BOLD}aiofranka.unlock(){_RST}\n")
                 print(f"  Or run from the terminal right now:")
                 print(f"    {_BOLD}$ aiofranka unlock{_RST}\n")
-                import sys
-                sys.exit(1)
-        except Exception:
-            pass  # Can't reach Desk API — let the server try
-
-        # Spawn server subprocess (no homing — user script controls movement)
-        self._server_proc = start_subprocess(self.robot_ip)
+            raise
 
         # Register cleanup so the subprocess dies when the script exits
         atexit.register(self._terminate_server)
@@ -182,7 +192,8 @@ class FrankaRemoteController:
         status = self._shm.read_status()
         if status == STATUS_ERROR:
             error_msg = self._shm.read_error()
-            raise RuntimeError(f"Server control loop error: {error_msg}")
+            self._connected = False
+            raise ServerDiedError(error_msg or "Unknown server error")
 
     @property
     def state(self) -> dict:
@@ -325,9 +336,28 @@ class FrankaRemoteController:
             raw = self._zmq_sock.recv()
             return msgpack.unpackb(raw, raw=False)
         except zmq.error.Again:
+            # ZMQ timed out — check if the server died with an error
+            server_error = None
+            if self._shm is not None:
+                try:
+                    status = self._shm.read_status()
+                    if status == STATUS_ERROR:
+                        server_error = self._shm.read_error()
+                except Exception:
+                    pass
+
+            # Fallback: if shm is gone but server process is dead, we know it crashed
+            if not server_error and self._server_proc is not None:
+                if not self._server_proc.is_alive():
+                    server_error = "Server process died unexpectedly"
+
+            if server_error:
+                self._connected = False
+                raise ServerDiedError(server_error) from None
+
             raise ConnectionError(
                 "Server not responding (timeout). Check if server is running."
-            )
+            ) from None
 
     def __del__(self):
         self._disconnect()

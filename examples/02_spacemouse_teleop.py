@@ -20,9 +20,36 @@ import aprilcube
 
 CONTROL_FREQ = 50
 
+# 5x5 grid of (KP, KD) configurations
+KP_VALUES = [10.0, 50.0, 100.0, 250.0, 500.0]
+KD_VALUES = [10.0, 20.0, 30.0, 40.0, 50.0]
+KP_KD_GRID = [(kp, kd) for kp in KP_VALUES for kd in KD_VALUES]
+
+# let's remove the four corners to focus on the more reasonable gain ranges
+KP_KD_GRID = [pair for pair in KP_KD_GRID if pair not in [(10.0, 10.0), (10.0, 50.0), (500.0, 10.0), (500.0, 50.0)]]
+
+# Boundary conditions: (KP=10, KD=10) -> 6.0,  (KP=500, KD=10) -> 0.2
+_KP_LO, _KP_HI = 10.0, 500.0
+_SCALE_LO, _SCALE_HI = 0.6, 0.016  # per-unit-KD values
+
+
+def runtime_scale(KP, KD, n=1.5):
+    """Compute RUNTIME_SCALE with tunable KP falloff exponent n.
+
+    n=1  ≈ original 1/KP formula
+    n>1  → more aggressive falloff at intermediate KP
+    """
+    A = (_SCALE_LO - _SCALE_HI) / (_KP_LO ** (-n) - _KP_HI ** (-n))
+    B = _SCALE_HI - A * _KP_HI ** (-n)
+    return KD * (A * KP ** (-n) + B)
+
+
 # Episode control events (bridged from keyboard thread to async loop)
 success_event = asyncio.Event()
 failure_event = asyncio.Event()
+
+
+TARGET_PER_TYPE = 100
 
 
 def get_next_episode_number(data_dir):
@@ -37,6 +64,61 @@ def get_next_episode_number(data_dir):
             except (IndexError, ValueError):
                 continue
     return max_num + 1
+
+
+def count_episodes(data_dir):
+    """Return {(kp, kd): {"type_RG": n, "type_GR": n}} by scanning existing directories."""
+    counts = {}
+    for kp, kd in KP_KD_GRID:
+        config_path = os.path.join(data_dir, f"K{kp:.0f}_D{kd:.0f}_with_states")
+        rg, gr = 0, 0
+        if os.path.exists(config_path):
+            for name in os.listdir(config_path):
+                ep_path = os.path.join(config_path, name)
+                if name.startswith("episode_") and os.path.isdir(ep_path):
+                    if os.path.exists(os.path.join(ep_path, "type_RG")):
+                        rg += 1
+                    elif os.path.exists(os.path.join(ep_path, "type_GR")):
+                        gr += 1
+        counts[(kp, kd)] = {"type_RG": rg, "type_GR": gr}
+    return counts
+
+
+def sample_next_config(data_dir, current_type):
+    """Pick the (KP, KD) most behind for current_type. Returns None if all done."""
+    counts = count_episodes(data_dir)
+    candidates = [
+        (kp, kd, tc[current_type])
+        for (kp, kd), tc in counts.items()
+        if tc[current_type] < TARGET_PER_TYPE
+    ]
+    if not candidates:
+        return None
+    min_count = min(c[2] for c in candidates)
+    best = [(kp, kd) for kp, kd, n in candidates if n == min_count]
+    return best[np.random.choice(len(best))]
+
+
+def print_progress(data_dir):
+    """Print a compact progress summary."""
+    counts = count_episodes(data_dir)
+    total = sum(tc["type_RG"] + tc["type_GR"] for tc in counts.values())
+    target = len(KP_KD_GRID) * TARGET_PER_TYPE * 2
+    pct = 100.0 * total / target if target else 0
+    done_slots = sum(
+        (1 if tc["type_RG"] >= TARGET_PER_TYPE else 0) +
+        (1 if tc["type_GR"] >= TARGET_PER_TYPE else 0)
+        for tc in counts.values()
+    )
+    total_slots = len(KP_KD_GRID) * 2
+    # Visual progress bar (30 chars wide)
+    bar_len = 30
+    filled = int(bar_len * pct / 100)
+    bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
+    # ANSI: bold cyan
+    CYAN = "\033[1;36m"
+    RESET = "\033[0m"
+    print(f"{CYAN}[Progress] [{bar}] {pct:.1f}%  {total}/{target} eps, {done_slots}/{total_slots} slots done{RESET}")
 
 
 def _ask_task_type_blocking():
@@ -192,43 +274,8 @@ async def main(args):
 
 
 
-    # KP = 10.0
-    # KD = 10.0
-    # RUNTIME_SCALE = 6.0
-
-    # KP = 10.0
-    # KD = 20.0
-    # RUNTIME_SCALE = 12.0
-
-    # KP = 10.0
-    # KD = 30.0
-    # RUNTIME_SCALE = 18.0
-
-    KP = 500.0
-    KD = 10.0
-    RUNTIME_SCALE = 0.2
-
-    # KP = 500.0
-    # KD = 50.0
-    # RUNTIME_SCALE = 0.8
-
-    # KP = 10.0
-    # KD = 50.0
-    # RUNTIME_SCALE = 30.0
-
-    
-
-    # Switch to OSC mode
-    controller.switch("osc")
-    controller.ee_kp = np.array([KP] * 3 + [500.0] * 3)
-    controller.ee_kd = np.array([KD] * 3 + [30.0] * 3)
-    controller.set_freq(CONTROL_FREQ)
-
-    # Translation scale: base * RUNTIME_SCALE
-    T_SCALE = 0.05 * RUNTIME_SCALE
     # Data directory
     os.makedirs(args.data_dir, exist_ok=True)
-    episode_num = get_next_episode_number(args.data_dir)
 
     # Keyboard listener
     loop = asyncio.get_event_loop()
@@ -240,7 +287,6 @@ async def main(args):
 
     spacemouse = SpaceMouse(yaw_only=True)
     print("[Init] Spacemouse connected.")
-    print(f"[Init] KP={KP}, KD={KD}, RUNTIME_SCALE={RUNTIME_SCALE}")
 
     pending_encode_tasks = []  # background MP4 encoding futures
 
@@ -249,8 +295,31 @@ async def main(args):
 
     try:
         while True:
+            # --- Pick the most under-collected config ---
+            print_progress(args.data_dir)
+            result = sample_next_config(args.data_dir, current_type)
+            if result is None:
+                print(f"[Done] All configs have {TARGET_PER_TYPE} episodes for {current_type}.")
+                break
+            KP, KD = result
+            RUNTIME_SCALE = runtime_scale(KP, KD, n=args.scale_exp)
+            T_SCALE = 0.05 * RUNTIME_SCALE
+
+            # Per-config data directory: data_dir/kp_{kp}_kd_{kd}/episode_XXX
+            config_dir = os.path.join(args.data_dir, f"K{KP:.0f}_D{KD:.0f}_with_states")
+            os.makedirs(config_dir, exist_ok=True)
+            episode_num = get_next_episode_number(config_dir)
+
+            # Switch to OSC with sampled gains
+            controller.switch("osc")
+            controller.ee_kp = np.array([KP] * 3 + [500.0] * 3)
+            controller.ee_kd = np.array([KD] * 3 + [30.0] * 3)
+            controller.set_freq(CONTROL_FREQ)
+
             # --- Start new episode ---
-            print(f"\n[Episode {episode_num:03d}] [{current_type}] Recording... ('r'=success, 't'=failure)")
+            print(f"\n[Episode {episode_num:03d}] [{current_type}] KP={KP}, KD={KD}, RUNTIME_SCALE={RUNTIME_SCALE:.2f}")
+            print(f"  Config dir: {config_dir}")
+            print(f"  Recording... ('r'=success, 't'=failure)")
 
             timestamps = []
             qpos_log = []
@@ -365,7 +434,7 @@ async def main(args):
 
 
             # --- Episode ended ---
-            ep_dir = os.path.join(args.data_dir, f"episode_{episode_num:03d}")
+            ep_dir = os.path.join(config_dir, f"episode_{episode_num:03d}")
             os.makedirs(ep_dir, exist_ok=True)
             open(os.path.join(ep_dir, "success" if is_success else "failure"), "w").close()
             open(os.path.join(ep_dir, current_type), "w").close()
@@ -474,21 +543,11 @@ async def main(args):
 
             print(f"\a[Episode {episode_num:03d}] Reset complete, starting next episode.")
 
-            # Switch back to OSC for next episode
-            controller.switch("osc")
-            controller.ee_kp = np.array([KP] * 3 + [500.0] * 3)
-            controller.ee_kd = np.array([KD] * 3 + [30.0] * 3)
-            controller.set_freq(CONTROL_FREQ)
-
             # Determine next task type
             if is_success:
-                # Alternate on success
                 current_type = "type_GR" if current_type == "type_RG" else "type_RG"
             else:
-                # Re-ask on failure
                 current_type = await ask_task_type()
-
-            episode_num += 1
 
     finally:
         cube_det.stop_async()
@@ -499,5 +558,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=str, default="./data")
     parser.add_argument("--GR", action="store_true", help="Start with type_GR instead of type_RG")
+    parser.add_argument("--scale-exp", type=float, default=1.0,
+                        help="KP falloff exponent for RUNTIME_SCALE (1=~original, higher=more aggressive)")
     args = parser.parse_args()
     asyncio.run(main(args))

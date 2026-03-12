@@ -2,14 +2,10 @@
 CLI entry point for aiofranka.
 
 Usage:
-    aiofranka unlock [--ip IP]
-    aiofranka lock [--ip IP]
-    aiofranka gravcomp [--ip IP]
-    aiofranka status [--ip IP]
+    aiofranka start-server [--ip IP] [--foreground] [--no-home]
     aiofranka stop [--ip IP]
+    aiofranka status [--ip IP]
     aiofranka mode [--set MODE]
-    aiofranka config [--mass M] [--com x,y,z] ...
-    aiofranka selftest [--ip IP]
     aiofranka log [-n LINES] [--follow]
 """
 
@@ -190,13 +186,56 @@ def _check_control_token(robot_ip: str, username: str, password: str,
 # ── Commands ───────────────────────────────────────────────────────────────
 
 def cmd_start(args):
-    print(f"\n  {YELLOW}Deprecated:{RST} 'aiofranka start-server' is no longer supported.\n")
-    print(f"  Start the server from Python instead:\n")
-    print(f"    {BOLD}import aiofranka{RST}")
-    print(f"    {BOLD}aiofranka.unlock(){RST}              {DIM}# unlock joints + activate FCI{RST}")
-    print(f"    {BOLD}ctrl = aiofranka.FrankaRemoteController(){RST}")
-    print(f"    {BOLD}ctrl.start(){RST}                     {DIM}# starts server automatically{RST}\n")
-    print(f"  CLI commands still available: {BOLD}unlock{RST}, {BOLD}lock{RST}, {BOLD}gravcomp{RST}, {BOLD}status{RST}, {BOLD}stop{RST}\n")
+    from aiofranka.ipc import pid_file_for_ip
+
+    robot_ip = _resolve_ip(args.ip)
+    protocol = args.protocol
+
+    # Header
+    ver = _get_version()
+    print(f"\n  {BOLD}aiofranka{RST} {DIM}v{ver}{RST}  {DIM}|{RST}  {robot_ip}  {DIM}({protocol}){RST}\n")
+
+    # Check if already running
+    pid_path = pid_file_for_ip(robot_ip)
+    if os.path.exists(pid_path):
+        with open(pid_path) as f:
+            pid = int(f.read().strip())
+        try:
+            os.kill(pid, 0)
+            print(f"  {YELLOW}Already running{RST} {DIM}(PID {pid}){RST}")
+            print(f"  Stop with: {BOLD}aiofranka stop{RST}\n")
+            return
+        except ProcessLookupError:
+            os.unlink(pid_path)
+
+    unlock = not args.no_unlock
+    if unlock:
+        username, password = _resolve_credentials(args)
+    else:
+        username, password = args.username, args.password
+
+    # Pre-check: if robot is already unlocked with FCI active but token is held,
+    # give the user a choice before launching the daemon.
+    skip_token = False
+    if unlock:
+        skip_token = _check_control_token(robot_ip, username, password, protocol)
+
+    lock_on_error = args.lock_on_error
+    home = not args.no_home
+
+    if args.foreground:
+        from aiofranka.server import run_server
+        run_server(robot_ip, foreground=True, unlock=unlock,
+                   username=username, password=password, protocol=protocol,
+                   skip_token=skip_token, lock_on_error=lock_on_error,
+                   home=home)
+    else:
+        from aiofranka.server import daemonize_and_run
+        daemonize_and_run(robot_ip, unlock=unlock,
+                          username=username, password=password, protocol=protocol,
+                          skip_token=skip_token, lock_on_error=lock_on_error,
+                          home=home)
+        _wait_for_server(robot_ip)
 
 
 def cmd_gravcomp(args):
@@ -1336,8 +1375,19 @@ def main():
     parser = argparse.ArgumentParser(prog="aiofranka", description="aiofranka control server")
     subparsers = parser.add_subparsers(dest="command")
 
-    # start-server (deprecated — kept so old scripts get a clear message)
-    subparsers.add_parser("start-server", help="(deprecated) Use Python API instead")
+    # start-server
+    p_start = subparsers.add_parser("start-server", help="Start the control server")
+    p_start.add_argument("--ip", type=str, default=None, help="Robot IP (default: last used or 172.16.0.2)")
+    p_start.add_argument("--foreground", action="store_true", help="Run in foreground (don't daemonize)")
+    p_start.add_argument("--no-unlock", action="store_true", help="Skip auto unlock/FCI activation")
+    p_start.add_argument("--username", type=str, default="admin", help="Robot web UI username (prompts if not saved)")
+    p_start.add_argument("--password", type=str, default="admin", help="Robot web UI password (prompts if not saved)")
+    p_start.add_argument("--protocol", type=str, default="https", choices=["http", "https"],
+                         help="Robot web UI protocol (default: https)")
+    p_start.add_argument("--lock-on-error", action="store_true",
+                         help="Lock joints when the server dies due to a control error (default: leave unlocked)")
+    p_start.add_argument("--no-home", action="store_true",
+                         help="Skip moving to home pose on startup")
 
     # gravcomp
     p_gravcomp = subparsers.add_parser("gravcomp", help="Gravity compensation mode (foreground, Ctrl+C to stop)")

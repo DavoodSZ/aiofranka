@@ -1006,30 +1006,6 @@ async def _run_server(robot_ip: str, unlock: bool = True,
         if remaining_sec:
             _progress_extra["self_test_remaining"] = remaining_sec
 
-    if not unlock:
-        # Pre-check: verify robot is ready for control (joints unlocked + FCI active)
-        try:
-            probe = _DeskClientV2(robot_ip, username, password, protocol=protocol)
-            joints_ok = probe.are_joints_unlocked()
-            fci_ok = probe.is_fci_active()
-            if not joints_ok or not fci_ok:
-                issues = []
-                if not joints_ok:
-                    issues.append("joints are locked")
-                if not fci_ok:
-                    issues.append("FCI is not active")
-                err = (f"Robot is not ready: {', '.join(issues)}.\n"
-                       f"Call aiofranka.unlock() before starting the controller.")
-                logger.error(err)
-                shm.write_error(err)
-                time.sleep(1)  # let parent read before cleanup
-                shm.close()
-                shm.unlink()
-                _cleanup_ipc(robot_ip)
-                return
-        except Exception:
-            pass  # Can't check (no credentials / network issue), let libfranka try
-
     # Save token to disk (unified pipeline — server + standalone use same file)
     if lock_client is not None and lock_client._token is not None:
         _save_token_state(robot_ip, lock_client._token, lock_client._token_id)
@@ -1215,11 +1191,8 @@ async def _run_server(robot_ip: str, unlock: bool = True,
         else:
             _write_progress(robot_ip, 1, 1, "Stopping 1kHz control loop")
 
-        # Cleanup — only clear the saved token if we owned it (lock_client was set).
-        # When unlock=False (e.g. start_subprocess), we don't own the token and
-        # clearing it would orphan the token held by whoever ran `aiofranka unlock`.
-        if lock_client is not None:
-            _clear_token(robot_ip)
+        # Cleanup
+        _clear_token(robot_ip)
         shm.write_status(STATUS_STOPPED)
         shm.close()
         shm.unlink()
@@ -1306,18 +1279,26 @@ def start_subprocess(ip: str, *,
 
     ip, username, password = _resolve_from_config(ip, None, None, interactive=False)
 
-    # Clean up stale PID file from a previous crashed script
+    # Kill any existing server for this IP before starting a new one
     pid_path = pid_file_for_ip(ip)
     if os.path.exists(pid_path):
         with open(pid_path) as f:
             old_pid = int(f.read().strip())
         try:
-            os.kill(old_pid, 0)
-            raise RuntimeError(
-                f"A server is already running for {ip} (PID {old_pid}). "
-                f"Stop it first or kill PID {old_pid}."
-            )
+            os.kill(old_pid, signal.SIGTERM)
+            # Wait for it to die
+            for _ in range(50):  # up to 5s
+                time.sleep(0.1)
+                try:
+                    os.kill(old_pid, 0)
+                except ProcessLookupError:
+                    break
+            else:
+                os.kill(old_pid, signal.SIGKILL)
+                time.sleep(0.2)
         except ProcessLookupError:
+            pass
+        if os.path.exists(pid_path):
             os.unlink(pid_path)
 
     def _target():

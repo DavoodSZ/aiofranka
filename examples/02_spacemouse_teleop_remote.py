@@ -24,6 +24,30 @@ import aprilcube
 
 CONTROL_FREQ = 50
 
+# 5x5 grid of (KP, KD) configurations
+KP_VALUES = [10.0, 50.0, 100.0, 250.0, 500.0]
+KD_VALUES = [10.0, 20.0, 30.0, 40.0, 50.0]
+KP_KD_GRID = [(kp, kd) for kp in KP_VALUES for kd in KD_VALUES]
+
+# let's remove the four corners to focus on the more reasonable gain ranges
+KP_KD_GRID = [pair for pair in KP_KD_GRID if pair not in [(10.0, 10.0), (10.0, 50.0), (500.0, 10.0), (500.0, 50.0)]]
+
+# Boundary conditions: (KP=10, KD=10) -> 6.0,  (KP=500, KD=10) -> 0.2
+_KP_LO, _KP_HI = 10.0, 500.0
+_SCALE_LO, _SCALE_HI = 0.6, 0.016  # per-unit-KD values
+
+
+def runtime_scale(KP, KD, n=1.5):
+    """Compute RUNTIME_SCALE with tunable KP falloff exponent n.
+
+    n=1  ≈ original 1/KP formula
+    n>1  → more aggressive falloff at intermediate KP
+    """
+    A = (_SCALE_LO - _SCALE_HI) / (_KP_LO ** (-n) - _KP_HI ** (-n))
+    B = _SCALE_HI - A * _KP_HI ** (-n)
+    return KD * (A * KP ** (-n) + B)
+
+
 # Episode control events
 success_event = threading.Event()
 failure_event = threading.Event()
@@ -43,15 +67,62 @@ def get_next_episode_number(data_dir):
     return max_num + 1
 
 
-def ask_task_type():
-    """Blocking input for task type selection."""
-    while True:
-        choice = input("[Task Type] Next episode type — (1) RG  (2) GR: ").strip()
-        if choice == "1":
-            return "type_RG"
-        elif choice == "2":
-            return "type_GR"
-        print("  Invalid input, enter 1 or 2.")
+TARGET_PER_TYPE = 100
+
+
+def count_episodes(data_dir):
+    """Return {(kp, kd): {"type_RG": n, "type_GR": n}} by scanning existing directories."""
+    counts = {}
+    for kp, kd in KP_KD_GRID:
+        config_path = os.path.join(data_dir, f"K{kp:.0f}_D{kd:.0f}_with_states")
+        rg, gr = 0, 0
+        if os.path.exists(config_path):
+            for name in os.listdir(config_path):
+                ep_path = os.path.join(config_path, name)
+                if name.startswith("episode_") and os.path.isdir(ep_path):
+                    if os.path.exists(os.path.join(ep_path, "type_RG")):
+                        rg += 1
+                    elif os.path.exists(os.path.join(ep_path, "type_GR")):
+                        gr += 1
+        counts[(kp, kd)] = {"type_RG": rg, "type_GR": gr}
+    return counts
+
+
+def sample_next_config(data_dir, current_type):
+    """Pick the (KP, KD) most behind for current_type. Returns None if all done."""
+    counts = count_episodes(data_dir)
+    candidates = [
+        (kp, kd, tc[current_type])
+        for (kp, kd), tc in counts.items()
+        if tc[current_type] < TARGET_PER_TYPE
+    ]
+    if not candidates:
+        return None
+    min_count = min(c[2] for c in candidates)
+    best = [(kp, kd) for kp, kd, n in candidates if n == min_count]
+    return best[np.random.choice(len(best))]
+
+
+def print_progress(data_dir):
+    """Print a colored progress bar with summary."""
+    counts = count_episodes(data_dir)
+    total = sum(tc["type_RG"] + tc["type_GR"] for tc in counts.values())
+    target = len(KP_KD_GRID) * TARGET_PER_TYPE * 2
+    pct = 100.0 * total / target if target else 0
+    done_slots = sum(
+        (1 if tc["type_RG"] >= TARGET_PER_TYPE else 0) +
+        (1 if tc["type_GR"] >= TARGET_PER_TYPE else 0)
+        for tc in counts.values()
+    )
+    total_slots = len(KP_KD_GRID) * 2
+    # Visual progress bar (30 chars wide)
+    bar_len = 30
+    filled = int(bar_len * pct / 100)
+    bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
+    # ANSI: bold cyan
+    CYAN = "\033[1;36m"
+    RESET = "\033[0m"
+    print(f"{CYAN}[Progress] [{bar}] {pct:.1f}%  {total}/{target} eps, {done_slots}/{total_slots} slots done{RESET}")
 
 
 def encode_grid_mp4(frame_lists, is_bgr_list, labels, filepath, fps=CONTROL_FREQ):
@@ -145,8 +216,6 @@ def keyboard_listener():
 
 def main(args):
 
-    aiofranka.start(lock_on_error=False)
-
     # Connect peripherals
     pycaas_client = PycaasClient()
     status = pycaas_client.status()
@@ -168,6 +237,8 @@ def main(args):
     print(f"[Init] Cube detector ready (async), using stream: {color_stream}")
 
     
+    aiofranka.unlock()
+
     controller = FrankaRemoteController("172.16.0.2")
     controller.start()
 
@@ -177,48 +248,8 @@ def main(args):
     # Save initial joint positions for resetting between episodes
     initial_qpos = controller.state["qpos"].copy()
 
-    runtime_scale = {
-        (10., 10.): 6.0, 
-        (10., 20.): 12.0, 
-        (10., 30.): 18.0, 
-        (10., 40.): 24.0,
-        (10., 50.): 30.0,
-
-        # (50., )
-
-        (500., 10.): 0.2, 
-        (500., 50.): 0.8,
-    }
-
-
-
-    # KP = 10.0
-    # KD = 10.0
-    # RUNTIME_SCALE = runtime_scale[(KP, KD)]
-
-    KP = 500.0
-    KD = 10.0
-    RUNTIME_SCALE = 0.2
-
-    # KP = 500.0
-    # KD = 50.0
-    # RUNTIME_SCALE = 0.8
-
-    # KP = 10.0
-    # KD = 50.0
-    # RUNTIME_SCALE = 30.0
-
-    # Switch to OSC mode
-    controller.switch("osc")
-    controller.ee_kp = np.array([KP] * 3 + [500.0] * 3)
-    controller.ee_kd = np.array([KD] * 3 + [30.0] * 3)
-    controller.set_freq(CONTROL_FREQ)
-
-    # Translation scale: base * RUNTIME_SCALE
-    T_SCALE = 0.05 * RUNTIME_SCALE
     # Data directory
     os.makedirs(args.data_dir, exist_ok=True)
-    episode_num = get_next_episode_number(args.data_dir)
 
     # Keyboard listener
     keyboard_thread = threading.Thread(target=keyboard_listener, daemon=True)
@@ -227,7 +258,6 @@ def main(args):
 
     spacemouse = SpaceMouse(yaw_only=True)
     print("[Init] Spacemouse connected.")
-    print(f"[Init] KP={KP}, KD={KD}, RUNTIME_SCALE={RUNTIME_SCALE}")
 
     executor = ThreadPoolExecutor()
     pending_encode_futures = []
@@ -237,8 +267,31 @@ def main(args):
 
     try:
         while True:
+            # --- Pick the most under-collected config ---
+            print_progress(args.data_dir)
+            result = sample_next_config(args.data_dir, current_type)
+            if result is None:
+                print(f"[Done] All configs have {TARGET_PER_TYPE} episodes for {current_type}.")
+                break
+            KP, KD = result
+            RUNTIME_SCALE = runtime_scale(KP, KD, n=args.scale_exp)
+            T_SCALE = 0.05 * RUNTIME_SCALE
+
+            # Per-config data directory: data_dir/kp_{kp}_kd_{kd}/episode_XXX
+            config_dir = os.path.join(args.data_dir, f"K{KP:.0f}_D{KD:.0f}_with_states")
+            os.makedirs(config_dir, exist_ok=True)
+            episode_num = get_next_episode_number(config_dir)
+
+            # Switch to OSC with sampled gains
+            controller.switch("osc")
+            controller.ee_kp = np.array([KP] * 3 + [500.0] * 3)
+            controller.ee_kd = np.array([KD] * 3 + [30.0] * 3)
+            controller.set_freq(CONTROL_FREQ)
+
             # --- Start new episode ---
-            print(f"\n[Episode {episode_num:03d}] [{current_type}] Recording... ('r'=success, 't'=failure)")
+            print(f"\n[Episode {episode_num:03d}] [{current_type}] KP={KP}, KD={KD}, RUNTIME_SCALE={RUNTIME_SCALE:.2f}")
+            print(f"  Config dir: {config_dir}")
+            print(f"  Recording... ('r'=success, 't'=failure)")
 
             timestamps = []
             qpos_log = []
@@ -338,84 +391,86 @@ def main(args):
                 loop_count += 1
 
             # --- Episode ended ---
-            ep_dir = os.path.join(args.data_dir, f"episode_{episode_num:03d}")
-            os.makedirs(ep_dir, exist_ok=True)
-            open(os.path.join(ep_dir, "success" if is_success else "failure"), "w").close()
-            open(os.path.join(ep_dir, current_type), "w").close()
             n_steps = len(timestamps)
             label = "SUCCESS" if is_success else "FAILURE"
             print(f"[Episode {episode_num:03d}] {label} [{current_type}] — {n_steps} steps recorded")
 
-            # Wait for any prior encoding to finish
-            if pending_encode_futures:
-                pending = [f for f in pending_encode_futures if not f.done()]
-                if pending:
-                    print(f"  Waiting for {len(pending)} prior encode(s) to finish...")
-                    wait(pending)
-                pending_encode_futures.clear()
+            if not args.practice:
+                ep_dir = os.path.join(config_dir, f"episode_{episode_num:03d}")
+                os.makedirs(ep_dir, exist_ok=True)
+                open(os.path.join(ep_dir, "success" if is_success else "failure"), "w").close()
+                open(os.path.join(ep_dir, current_type), "w").close()
 
-            # Build and save npz
-            if n_steps > 0:
-                save_dict = {
-                    "timestamps": np.array(timestamps),
-                    "qpos": np.stack(qpos_log),
-                    "qvel": np.stack(qvel_log),
-                    "ee": np.stack(ee_log),
-                    "ee_desired": np.stack(ee_desired_log),
-                    "last_torque": np.stack(last_torque_log),
-                    "cube_T": np.stack(cube_T_log),
-                    "success": np.array(is_success),
-                    "control_freq": np.array(CONTROL_FREQ),
-                    "ee_kp": np.array([KP] * 3 + [500.0] * 3),
-                    "ee_kd": np.array([KD] * 3 + [30.0] * 3),
-                }
+                # Wait for any prior encoding to finish
+                if pending_encode_futures:
+                    pending = [f for f in pending_encode_futures if not f.done()]
+                    if pending:
+                        print(f"  Waiting for {len(pending)} prior encode(s) to finish...")
+                        wait(pending)
+                    pending_encode_futures.clear()
+
+                # Build and save npz
+                if n_steps > 0:
+                    save_dict = {
+                        "timestamps": np.array(timestamps),
+                        "qpos": np.stack(qpos_log),
+                        "qvel": np.stack(qvel_log),
+                        "ee": np.stack(ee_log),
+                        "ee_desired": np.stack(ee_desired_log),
+                        "last_torque": np.stack(last_torque_log),
+                        "cube_T": np.stack(cube_T_log),
+                        "success": np.array(is_success),
+                        "control_freq": np.array(CONTROL_FREQ),
+                        "ee_kp": np.array([KP] * 3 + [500.0] * 3),
+                        "ee_kd": np.array([KD] * 3 + [30.0] * 3),
+                    }
+                    for sid in stream_ids:
+                        save_dict[f"camera_indices_{sid}"] = np.array(camera_frame_indices[sid], dtype=np.int64)
+
+                    npz_path = os.path.join(ep_dir, "state.npz")
+                    np.savez(npz_path, **save_dict)
+                    print(f"  Saved {npz_path}")
+
+                # Fire off frame encoding in background threads
                 for sid in stream_ids:
-                    save_dict[f"camera_indices_{sid}"] = np.array(camera_frame_indices[sid], dtype=np.int64)
+                    if "depth" in sid:
+                        continue
+                    frames = camera_frames[sid]
+                    if len(frames) == 0:
+                        continue
+                    out_path = os.path.join(ep_dir, f"{sid}.mp4")
+                    print(f"  Encoding {len(frames)} frames -> {out_path} (background)")
+                    pending_encode_futures.append(
+                        executor.submit(encode_frames_to_mp4, frames, out_path, CONTROL_FREQ)
+                    )
 
-                npz_path = os.path.join(ep_dir, "state.npz")
-                np.savez(npz_path, **save_dict)
-                print(f"  Saved {npz_path}")
+                if cube_viz_frames:
+                    viz_path = os.path.join(ep_dir, "cube_debug.mp4")
+                    print(f"  Encoding {len(cube_viz_frames)} cube debug frames -> {viz_path} (background)")
+                    pending_encode_futures.append(
+                        executor.submit(encode_frames_to_mp4, cube_viz_frames, viz_path, CONTROL_FREQ)
+                    )
 
-            # Fire off frame encoding in background threads
-            for sid in stream_ids:
-                if "depth" in sid:
-                    continue
-                frames = camera_frames[sid]
-                if len(frames) == 0:
-                    continue
-                out_path = os.path.join(ep_dir, f"{sid}.mp4")
-                print(f"  Encoding {len(frames)} frames -> {out_path} (background)")
-                pending_encode_futures.append(
-                    executor.submit(encode_frames_to_mp4, frames, out_path, CONTROL_FREQ)
-                )
-
-            if cube_viz_frames:
-                viz_path = os.path.join(ep_dir, "cube_debug.mp4")
-                print(f"  Encoding {len(cube_viz_frames)} cube debug frames -> {viz_path} (background)")
-                pending_encode_futures.append(
-                    executor.submit(encode_frames_to_mp4, cube_viz_frames, viz_path, CONTROL_FREQ)
-                )
-
-            color_sids = [s for s in stream_ids if "color" in s]
-            grid_lists = []
-            grid_bgr_flags = []
-            grid_labels = []
-            for sid in color_sids[:3]:
-                grid_lists.append(camera_frames.get(sid, []))
-                grid_bgr_flags.append(False)
-                grid_labels.append(sid.replace("_color", "").replace("rs_", ""))
-            grid_lists.append(cube_viz_frames)
-            grid_bgr_flags.append(True)
-            grid_labels.append("cube_det")
-            while len(grid_lists) < 4:
-                grid_lists.append([])
+                color_sids = [s for s in stream_ids if "color" in s]
+                grid_lists = []
+                grid_bgr_flags = []
+                grid_labels = []
+                for sid in color_sids[:3]:
+                    grid_lists.append(camera_frames.get(sid, []))
+                    grid_bgr_flags.append(False)
+                    grid_labels.append(sid.replace("_color", "").replace("rs_", ""))
+                grid_lists.append(cube_viz_frames)
                 grid_bgr_flags.append(True)
-                grid_labels.append("")
-            grid_path = os.path.join(ep_dir, "grid.mp4")
-            print(f"  Encoding 2x2 grid -> {grid_path} (background)")
-            pending_encode_futures.append(
-                executor.submit(encode_grid_mp4, grid_lists[:4], grid_bgr_flags[:4], grid_labels[:4], grid_path, CONTROL_FREQ)
-            )
+                grid_labels.append("cube_det")
+                while len(grid_lists) < 4:
+                    grid_lists.append([])
+                    grid_bgr_flags.append(True)
+                    grid_labels.append("")
+                grid_path = os.path.join(ep_dir, "grid.mp4")
+                print(f"  Encoding 2x2 grid -> {grid_path} (background)")
+                pending_encode_futures.append(
+                    executor.submit(encode_grid_mp4, grid_lists[:4], grid_bgr_flags[:4], grid_labels[:4], grid_path, CONTROL_FREQ)
+                )
 
             # Reset robot while encoding runs in parallel
             base = np.array([1, 1, 1, 1, 0.6, 0.6, 0.6])
@@ -427,8 +482,8 @@ def main(args):
             controller.move(initial_qpos)
             time.sleep(1.0)
 
-            # Wait for encodes to finish before switching back to OSC
-            if pending_encode_futures:
+            # Wait for encodes to finish before next episode
+            if not args.practice and pending_encode_futures:
                 pending = [f for f in pending_encode_futures if not f.done()]
                 if pending:
                     print(f"  Waiting for {len(pending)} encode(s) to finish...")
@@ -437,19 +492,11 @@ def main(args):
 
             print(f"\a[Episode {episode_num:03d}] Reset complete, starting next episode.")
 
-            # Switch back to OSC for next episode
-            controller.switch("osc")
-            controller.ee_kp = np.array([KP] * 3 + [500.0] * 3)
-            controller.ee_kd = np.array([KD] * 3 + [30.0] * 3)
-            controller.set_freq(CONTROL_FREQ)
-
             # Determine next task type
             if is_success:
                 current_type = "type_GR" if current_type == "type_RG" else "type_RG"
             else:
                 current_type = ask_task_type()
-
-            episode_num += 1
 
     finally:
         cube_det.stop_async()
@@ -461,5 +508,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=str, default="./data")
     parser.add_argument("--GR", action="store_true", help="Start with type_GR instead of type_RG")
+    parser.add_argument("--scale-exp", type=float, default=1.0,
+                        help="KP falloff exponent for RUNTIME_SCALE (1=~original, higher=more aggressive)")
+    parser.add_argument("--practice", action="store_true", help="Run in practice mode (no saving, just keyboard control)")
     args = parser.parse_args()
     main(args)
