@@ -871,7 +871,8 @@ _DEFAULT_HOME = [0, 0, 0.0, -1.57079, 0, 1.57079, -0.7853]
 async def _run_server(robot_ip: str, unlock: bool = True,
                       username: str = "admin", password: str = "admin",
                       protocol: str = "https", skip_token: bool = False,
-                      lock_on_error: bool = False, home: bool = True):
+                      lock_on_error: bool = False, home: bool = True,
+                      controller_cls=None):
     """Main server coroutine with auto-unlock and retry on errors."""
     logger.info(f"Starting aiofranka server for {robot_ip}")
 
@@ -1040,8 +1041,10 @@ async def _run_server(robot_ip: str, unlock: bool = True,
 
     # Start ZMQ command handler in a dedicated thread so it never blocks the
     # asyncio control loop (libfranka requires strict 1kHz timing).
+    if controller_cls is None:
+        controller_cls = ServerController
     robot = RobotInterface(robot_ip)
-    controller = ServerController(robot, shm)
+    controller = controller_cls(robot, shm)
     cmd_handler = CommandHandler(controller, shm, robot_ip)
     cmd_handler._loop = asyncio.get_event_loop()
     cmd_thread = threading.Thread(target=cmd_handler.run, daemon=True, name="zmq-cmd-handler")
@@ -1117,7 +1120,7 @@ async def _run_server(robot_ip: str, unlock: bool = True,
 
                     # 7. New robot + controller (old C++ object may be in bad state)
                     robot = RobotInterface(robot_ip)
-                    controller = ServerController(robot, shm)
+                    controller = controller_cls(robot, shm)
                     cmd_handler.controller = controller  # update ZMQ handler ref
 
                     ctrl_task = await controller.start()
@@ -1136,6 +1139,9 @@ async def _run_server(robot_ip: str, unlock: bool = True,
                 shm.write_error(str(e))
                 if cmd_handler._should_stop or shutdown_requested:
                     break  # user requested stop, don't retry
+                if "Reflex" in str(e):
+                    logger.error("Robot is in Reflex mode — wait a few seconds and relaunch")
+                    break
                 if attempt == max_retries:
                     logger.error("Max retries reached, shutting down")
                     break
@@ -1211,7 +1217,8 @@ async def _run_server(robot_ip: str, unlock: bool = True,
 def run_server(robot_ip: str, foreground: bool = False,
                unlock: bool = True, username: str = "admin", password: str = "admin",
                protocol: str = "https", skip_token: bool = False,
-               lock_on_error: bool = False, home: bool = True):
+               lock_on_error: bool = False, home: bool = True,
+               controller_cls=None):
     """Entry point for the server process."""
     if foreground:
         logging.basicConfig(
@@ -1230,7 +1237,7 @@ def run_server(robot_ip: str, foreground: bool = False,
     asyncio.run(_run_server(robot_ip, unlock=unlock, username=username,
                             password=password, protocol=protocol,
                             skip_token=skip_token, lock_on_error=lock_on_error,
-                            home=home))
+                            home=home, controller_cls=controller_cls))
 
 
 def daemonize_and_run(robot_ip: str, unlock: bool = True,
@@ -1339,6 +1346,17 @@ def start_subprocess(ip: str, *,
                 err = shm.read_error()
                 shm.close()
                 proc.terminate()
+                if "Reflex" in err:
+                    import sys
+                    print("Robot is in Reflex mode — waiting 5s before retry...")
+                    for i in range(50):
+                        time.sleep(0.1)
+                        filled = (i + 1) * 20 // 50
+                        bar = "█" * filled + "░" * (20 - filled)
+                        sys.stdout.write(f"\r  [{bar}] {(i+1)*2}%")
+                        sys.stdout.flush()
+                    print()
+                    return start_subprocess(ip, timeout=timeout)
                 raise RuntimeError(err)
             shm.close()
         except FileNotFoundError:
@@ -1847,6 +1865,17 @@ def unlock(ip: str = None, *, username: str = None, password: str = None,
             pass
         _clear_token(ip)
 
+    # Check self-test status before starting
+    self_test_due = False
+    try:
+        st_info = client.get_self_test_status()
+        self_test_due = st_info.get("status") == "Elapsed"
+    except Exception:
+        pass
+
+    if self_test_due:
+        total += 1  # extra step for self-tests
+
     # Step 1: Acquire control token
     _run_with_spinner("Acquiring control token", 1, total,
                       lambda: client._with_retry(
@@ -1858,11 +1887,19 @@ def unlock(ip: str = None, *, username: str = None, password: str = None,
         _run_with_spinner("Recovering safety errors", 2, total,
                           client.recover_errors)
 
-        # Step 3: Unlock joints
-        _run_with_spinner("Unlocking joints", 3, total, client.unlock)
+        step = 3
 
-        # Step 4: Activate FCI
-        _run_with_spinner("Activating FCI", 4, total, client.activate_fci)
+        # Run self-tests if overdue (must happen before unlock)
+        if self_test_due:
+            _run_with_spinner("Running self-tests (overdue)", step, total,
+                              client.execute_self_tests)
+            step += 1
+
+        # Unlock joints
+        _run_with_spinner("Unlocking joints", step, total, client.unlock)
+
+        # Activate FCI
+        _run_with_spinner("Activating FCI", step + 1, total, client.activate_fci)
 
         # Save token + token_id to disk so lock() can pick it up later
         _save_token_state(ip, client._token, client._token_id)

@@ -18,6 +18,7 @@ import select
 import cv2
 import argparse
 from concurrent.futures import ThreadPoolExecutor, wait
+from collections import deque
 
 from pycaas import PycaasClient
 import aprilcube
@@ -103,6 +104,8 @@ def sample_next_config(data_dir, current_type):
     return best[np.random.choice(len(best))]
 
 
+_pct_history = deque(maxlen=10)  # stores (time, pct) samples
+
 def print_progress(data_dir):
     """Print a colored progress bar with summary."""
     counts = count_episodes(data_dir)
@@ -122,7 +125,27 @@ def print_progress(data_dir):
     # ANSI: bold cyan
     CYAN = "\033[1;36m"
     RESET = "\033[0m"
-    print(f"{CYAN}[Progress] [{bar}] {pct:.1f}%  {total}/{target} eps, {done_slots}/{total_slots} slots done{RESET}")
+    # Track rate using rolling window: seconds per 1% point
+    now = time.time()
+    _pct_history.append((now, pct))
+    timing_str = ""
+    if len(_pct_history) >= 2:
+        t0, p0 = _pct_history[0]
+        delta_pct = pct - p0
+        delta_t = now - t0
+        if delta_pct > 0:
+            s = delta_t / delta_pct
+            eta_sec = s * (100.0 - pct)
+            if s < 60:
+                rate_str = f"{s:.1f}s/%"
+            else:
+                rate_str = f"{s/60:.1f}m/%"
+            if eta_sec < 3600:
+                eta_str = f"{eta_sec/60:.0f}m"
+            else:
+                eta_str = f"{eta_sec/3600:.1f}h"
+            timing_str = f", {rate_str}, ETA {eta_str}"
+    print(f"{CYAN}[Progress] [{bar}] {pct:.1f}%  {total}/{target} eps, {done_slots}/{total_slots} slots done{timing_str}{RESET}")
 
 
 def encode_grid_mp4(frame_lists, is_bgr_list, labels, filepath, fps=CONTROL_FREQ):

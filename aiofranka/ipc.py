@@ -75,6 +75,12 @@ _ERROR_MSG_OFFSET = _offset
 _ERROR_MSG_SIZE = 256
 _offset += _ERROR_MSG_SIZE
 
+# Jitter stats area (server writes, client reads)
+# Layout: [max_dt_ms: float64] [warn_count: uint64] [error_count: uint64]
+_JITTER_OFFSET = _offset
+_JITTER_SIZE = 8 + 8 + 8  # 24 bytes
+_offset += _JITTER_SIZE
+
 SHM_SIZE = _offset  # Total shared memory size
 
 
@@ -180,6 +186,19 @@ class StateBlock:
     def read_error(self) -> str:
         raw = bytes(self.buf[_ERROR_MSG_OFFSET:_ERROR_MSG_OFFSET + _ERROR_MSG_SIZE])
         return raw.split(b'\x00', 1)[0].decode('utf-8', errors='replace')
+
+    def write_jitter_stats(self, max_dt_ms: float, warn_count: int, error_count: int):
+        """Server-side: write jitter statistics to shared memory."""
+        struct.pack_into('d', self.buf, _JITTER_OFFSET, max_dt_ms)
+        struct.pack_into('Q', self.buf, _JITTER_OFFSET + 8, warn_count)
+        struct.pack_into('Q', self.buf, _JITTER_OFFSET + 16, error_count)
+
+    def read_jitter_stats(self) -> tuple:
+        """Client-side: read jitter statistics. Returns (max_dt_ms, warn_count, error_count)."""
+        max_dt_ms = struct.unpack_from('d', self.buf, _JITTER_OFFSET)[0]
+        warn_count = struct.unpack_from('Q', self.buf, _JITTER_OFFSET + 8)[0]
+        error_count = struct.unpack_from('Q', self.buf, _JITTER_OFFSET + 16)[0]
+        return max_dt_ms, warn_count, error_count
 
     def close(self):
         self.shm.close()

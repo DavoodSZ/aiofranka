@@ -8,6 +8,7 @@ and ZMQ (commands). Drop-in replacement for FrankaController with a sync API.
 import atexit
 import contextlib
 import json
+import logging
 import os
 import time
 import threading
@@ -17,6 +18,8 @@ import numpy as np
 import zmq
 
 from aiofranka.ipc import StateBlock, zmq_endpoint_for_ip, STATUS_ERROR
+
+logger = logging.getLogger("aiofranka.remote")
 
 DEFAULT_IP = "172.16.0.2"
 
