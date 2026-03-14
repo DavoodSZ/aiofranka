@@ -80,6 +80,22 @@ class ServerControllerV2(ServerController):
 
     def _run_rt(self):
         """The RT control loop — runs in a dedicated thread with per-phase profiling."""
+        # Pin to last CPU core and set SCHED_FIFO for minimal jitter
+        n_cpus = os.cpu_count() or 1
+        rt_core = n_cpus - 1
+        try:
+            os.sched_setaffinity(0, {rt_core})
+            logger.info(f"RT thread pinned to CPU {rt_core}")
+        except Exception as e:
+            logger.warning(f"Could not pin RT thread to CPU {rt_core}: {e}")
+        try:
+            os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(80))
+            logger.info("RT thread set to SCHED_FIFO priority 80")
+        except PermissionError:
+            logger.warning("Could not set SCHED_FIFO (no permission) — run with CAP_SYS_NICE for best RT performance")
+        except Exception as e:
+            logger.warning(f"Could not set SCHED_FIFO: {e}")
+
         last_t = time.perf_counter()
         jitter_log_t = last_t
         max_dt_ms = 0.0
@@ -105,6 +121,15 @@ class ServerControllerV2(ServerController):
         tc = robot.torque_controller
         shm = self._shm
 
+        # Pre-allocate reusable buffers to avoid per-iteration allocations
+        _ee = np.eye(4)
+        _jac = np.zeros((6, 7))
+        _mm = np.zeros((7, 7))
+        _qpos = np.empty(model.nq)
+        _qvel = np.empty(model.nv)
+        _ctrl = np.empty(model.nu)
+        _zero_torque = np.zeros(7)
+
         try:
             while self.running:
                 # === Phase 1: readOnce (blocking wait for next robot state) ===
@@ -124,25 +149,26 @@ class ServerControllerV2(ServerController):
                     t3 = t1
 
                 # === Phase 3: build state dict (ee, jac, mm) ===
-                ee_xyz = data.site(site_id).xpos
-                ee_mat = data.site(site_id).xmat.reshape(3, 3)
-                ee = np.eye(4)
-                ee[:3, :3] = ee_mat
-                ee[:3, 3] = ee_xyz
+                _ee[:3, :3] = data.site(site_id).xmat.reshape(3, 3)
+                _ee[:3, 3] = data.site(site_id).xpos
 
-                jac = np.zeros((6, 7))
-                mujoco.mj_jacSite(model, data, jac[:3], jac[3:], site_id)
+                _jac[:] = 0
+                mujoco.mj_jacSite(model, data, _jac[:3], _jac[3:], site_id)
 
-                mm = np.zeros((7, 7))
-                mujoco.mj_fullM(model, mm, data.qM)
+                _mm[:] = 0
+                mujoco.mj_fullM(model, _mm, data.qM)
+
+                np.copyto(_qpos, data.qpos)
+                np.copyto(_qvel, data.qvel)
+                np.copyto(_ctrl, data.ctrl)
 
                 state = {
-                    "qpos": np.array(data.qpos),
-                    "qvel": np.array(data.qvel),
-                    "ee": ee,
-                    "jac": jac,
-                    "mm": mm,
-                    "last_torque": np.array(data.ctrl),
+                    "qpos": _qpos,
+                    "qvel": _qvel,
+                    "ee": _ee,
+                    "jac": _jac,
+                    "mm": _mm,
+                    "last_torque": _ctrl,
                 }
                 self.state = state
                 t4 = time.perf_counter()
@@ -162,12 +188,15 @@ class ServerControllerV2(ServerController):
                 # separately next iteration via readOnce timing.
 
                 # === Phase 5: shared memory write ===
-                full_state = dict(state)
-                full_state["q_desired"] = self.q_desired
-                full_state["ee_desired"] = self.ee_desired
-                full_state["torque"] = getattr(self, "torque", np.zeros(7))
-                full_state["initial_qpos"] = self.initial_qpos
-                full_state["initial_ee"] = self.initial_ee
+                full_state = {
+                    "qpos": _qpos, "qvel": _qvel, "ee": _ee,
+                    "jac": _jac, "mm": _mm, "last_torque": _ctrl,
+                    "q_desired": self.q_desired,
+                    "ee_desired": self.ee_desired,
+                    "torque": getattr(self, "torque", _zero_torque),
+                    "initial_qpos": self.initial_qpos,
+                    "initial_ee": self.initial_ee,
+                }
                 shm.write_state(full_state)
                 shm.write_ctrl_type(self.type)
                 t6 = time.perf_counter()

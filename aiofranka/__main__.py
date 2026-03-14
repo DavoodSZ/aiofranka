@@ -1430,6 +1430,315 @@ def cmd_log(args):
             pass
 
 
+def _run_bench_loop(robot, duration, cpu_pin=None, sched_fifo=None,
+                    disable_gc=False, mlock=False, prealloc=False):
+    """Run the core benchmark loop and return (dt_array, phase_array).
+
+    Applies RT tuning (cpu pin, SCHED_FIFO, gc, mlock, prealloc) during the
+    measured window only.
+    """
+    import gc
+    import mujoco
+    import numpy as np
+    import pylibfranka
+
+    model = robot.model
+    data = robot.data
+    site_id = robot.site_id
+    tc = robot.torque_controller
+
+    PHASES = ["readOnce", "mj_fwd", "state_build", "ctrl_law", "shm_write"]
+    n_iters = int(duration * 1000)
+    dt_all = np.empty(n_iters, dtype=np.float64)
+    phase_all = np.empty((n_iters, len(PHASES)), dtype=np.float64)
+
+    # Pre-allocate reusable buffers (used when prealloc=True)
+    _ee = np.eye(4)
+    _jac = np.zeros((6, 7))
+    _mm = np.zeros((7, 7))
+    _q = np.empty(7)
+    _dq = np.empty(7)
+    _kp = np.ones(7) * 80
+    _kd = np.ones(7) * 4
+    _tau = np.empty(7)
+    _state_qpos = np.empty(7)
+    _state_qvel = np.empty(7)
+    _state_ctrl = np.empty(7)
+
+    # Warm up (500 iterations = 0.5s)
+    for _ in range(500):
+        robot_state, _ = tc.readOnce()
+        data.qpos[:] = robot_state.q
+        data.qvel[:] = robot_state.dq
+        data.ctrl[:] = robot_state.tau_J_d
+        mujoco.mj_forward(model, data)
+        torque_cmd = pylibfranka.Torques([0.0] * 7)
+        torque_cmd.motion_finished = False
+        tc.writeOnce(torque_cmd)
+
+    # Apply RT tuning
+    old_affinity = None
+    applied_fifo = False
+    gc_was_enabled = gc.isenabled()
+    if cpu_pin is not None:
+        old_affinity = os.sched_getaffinity(0)
+        os.sched_setaffinity(0, {cpu_pin})
+    if sched_fifo is not None:
+        try:
+            os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(sched_fifo))
+            applied_fifo = True
+        except PermissionError:
+            pass
+    if disable_gc:
+        gc.collect()  # collect now, then disable
+        gc.disable()
+    if mlock:
+        try:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6")
+            MCL_CURRENT = 1
+            MCL_FUTURE = 2
+            libc.mlockall(MCL_CURRENT | MCL_FUTURE)
+        except Exception:
+            pass
+
+    if prealloc:
+        last_t = time.perf_counter()
+        for i in range(n_iters):
+            t0 = time.perf_counter()
+            robot_state, _ = tc.readOnce()
+            t1 = time.perf_counter()
+
+            data.qpos[:] = robot_state.q
+            data.qvel[:] = robot_state.dq
+            data.ctrl[:] = robot_state.tau_J_d
+            mujoco.mj_forward(model, data)
+            t2 = time.perf_counter()
+
+            ee_xyz = data.site(site_id).xpos
+            ee_mat = data.site(site_id).xmat.reshape(3, 3)
+            _ee[:3, :3] = ee_mat
+            _ee[:3, 3] = ee_xyz
+            _jac[:] = 0
+            mujoco.mj_jacSite(model, data, _jac[:3], _jac[3:], site_id)
+            _mm[:] = 0
+            mujoco.mj_fullM(model, _mm, data.qM)
+            t3 = time.perf_counter()
+
+            np.copyto(_q, data.qpos)
+            np.copyto(_dq, data.qvel)
+            np.subtract(_q, _q, out=_tau)
+            np.multiply(_kp, _tau, out=_tau)
+            np.subtract(_tau, _kd * _dq, out=_tau)
+            torque_cmd = pylibfranka.Torques(_tau.tolist())
+            torque_cmd.motion_finished = False
+            tc.writeOnce(torque_cmd)
+            t4 = time.perf_counter()
+
+            np.copyto(_state_qpos, data.qpos)
+            np.copyto(_state_qvel, data.qvel)
+            np.copyto(_state_ctrl, data.ctrl)
+            t5 = time.perf_counter()
+
+            dt_all[i] = (t0 - last_t) * 1e6
+            phase_all[i, 0] = (t1 - t0) * 1e6
+            phase_all[i, 1] = (t2 - t1) * 1e6
+            phase_all[i, 2] = (t3 - t2) * 1e6
+            phase_all[i, 3] = (t4 - t3) * 1e6
+            phase_all[i, 4] = (t5 - t4) * 1e6
+            last_t = t0
+    else:
+        last_t = time.perf_counter()
+        for i in range(n_iters):
+            t0 = time.perf_counter()
+            robot_state, _ = tc.readOnce()
+            t1 = time.perf_counter()
+
+            data.qpos[:] = robot_state.q
+            data.qvel[:] = robot_state.dq
+            data.ctrl[:] = robot_state.tau_J_d
+            mujoco.mj_forward(model, data)
+            t2 = time.perf_counter()
+
+            ee_xyz = data.site(site_id).xpos
+            ee_mat = data.site(site_id).xmat.reshape(3, 3)
+            ee = np.eye(4)
+            ee[:3, :3] = ee_mat
+            ee[:3, 3] = ee_xyz
+            jac = np.zeros((6, 7))
+            mujoco.mj_jacSite(model, data, jac[:3], jac[3:], site_id)
+            mm = np.zeros((7, 7))
+            mujoco.mj_fullM(model, mm, data.qM)
+            t3 = time.perf_counter()
+
+            q = np.array(data.qpos)
+            dq = np.array(data.qvel)
+            kp = np.ones(7) * 80
+            kd = np.ones(7) * 4
+            tau = kp * (q - q) - kd * dq
+            torque_cmd = pylibfranka.Torques(tau.tolist())
+            torque_cmd.motion_finished = False
+            tc.writeOnce(torque_cmd)
+            t4 = time.perf_counter()
+
+            _ = {
+                "qpos": np.array(data.qpos), "qvel": np.array(data.qvel),
+                "ee": ee.copy(), "jac": jac.copy(), "mm": mm.copy(),
+                "last_torque": np.array(data.ctrl),
+            }
+            t5 = time.perf_counter()
+
+            dt_all[i] = (t0 - last_t) * 1e6
+            phase_all[i, 0] = (t1 - t0) * 1e6
+            phase_all[i, 1] = (t2 - t1) * 1e6
+            phase_all[i, 2] = (t3 - t2) * 1e6
+            phase_all[i, 3] = (t4 - t3) * 1e6
+            phase_all[i, 4] = (t5 - t4) * 1e6
+            last_t = t0
+
+    # Restore
+    if disable_gc and gc_was_enabled:
+        gc.enable()
+    if applied_fifo:
+        try:
+            os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
+        except Exception:
+            pass
+    if old_affinity is not None:
+        os.sched_setaffinity(0, old_affinity)
+    if mlock:
+        try:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6")
+            libc.munlockall()
+        except Exception:
+            pass
+
+    return dt_all, phase_all, PHASES
+
+
+def _run_all_combos(args):
+    """Run benchmark with all RT setting combinations and print comparison."""
+    import numpy as np
+    from aiofranka.robot import RobotInterface
+    from aiofranka.server import (
+        _DeskClientV2, _load_token_state, _save_token_state, _clear_token,
+    )
+
+    robot_ip = _resolve_ip(args.ip)
+    username, password = _resolve_credentials(args)
+    protocol = args.protocol
+    duration = args.duration
+
+    print(f"\n  {BOLD}aiofranka rt-benchmark{RST} {DIM}|{RST} all combos {DIM}({robot_ip}){RST}")
+    print(f"  {DIM}Duration: {duration:.0f}s per run{RST}\n")
+
+    # --- Setup ---
+    setup_total = 4
+    try:
+        client = _DeskClientV2(robot_ip, username, password, protocol=protocol)
+        saved_token, saved_token_id = _load_token_state(robot_ip)
+        if saved_token is not None:
+            client._token = saved_token
+            client._token_id = saved_token_id
+            if not client.validate_token():
+                client._token = None
+                client._token_id = None
+        if client._token is None:
+            _cli_run_with_spinner("Acquiring control token", 1, setup_total,
+                                  client.take_token, timeout=15)
+        else:
+            print(_cli_step_line(1, setup_total, "Acquiring control token",
+                                 f"{GREEN}done{RST} {DIM}(reused){RST}"))
+        _cli_run_with_spinner("Recovering safety errors", 2, setup_total,
+                              client.recover_errors)
+        if client.are_joints_unlocked():
+            print(_cli_step_line(3, setup_total, "Unlocking joints",
+                                 f"{GREEN}done{RST} {DIM}(already){RST}"))
+        else:
+            _cli_run_with_spinner("Unlocking joints", 3, setup_total,
+                                  client.unlock)
+        if client.is_fci_active():
+            print(_cli_step_line(4, setup_total, "Activating FCI",
+                                 f"{GREEN}done{RST} {DIM}(already){RST}"))
+        else:
+            _cli_run_with_spinner("Activating FCI", 4, setup_total,
+                                  client.activate_fci)
+        _save_token_state(robot_ip, client._token, client._token_id)
+    except Exception:
+        try:
+            client.release_token()
+            _clear_token(robot_ip)
+        except Exception:
+            pass
+        raise
+
+    robot = RobotInterface(robot_ip)
+    robot.start()
+
+    # Use last P-core (i9-14900K: cores 0-15 are P-cores, 16-31 are E-cores)
+    n_cpus = os.cpu_count() or 1
+    # Pick last core (often least busy) and a mid-range core
+    last_core = n_cpus - 1
+    # (label, cpu_pin, sched_fifo, disable_gc, mlock, prealloc)
+    C = last_core
+    combos = [
+        ("baseline",              None, None, False, False, False),
+        (f"cpu={C}+FIFO",        C,    80,   False, False, False),
+        (f"cpu={C}+FIFO+nogc",   C,    80,   True,  False, False),
+        (f"cpu={C}+FIFO+mlock",  C,    80,   False, True,  False),
+        (f"cpu={C}+FIFO+prealloc", C,  80,   False, False, True),
+        (f"cpu={C}+FIFO+all",    C,    80,   True,  True,  True),
+    ]
+
+    results = []
+    try:
+        for label, cpu_pin, sched_fifo, dis_gc, ml, prealloc in combos:
+            sys.stdout.write(f"  Running: {BOLD}{label}{RST} ...")
+            sys.stdout.flush()
+            dt_all, phase_all, phases = _run_bench_loop(
+                robot, duration, cpu_pin=cpu_pin, sched_fifo=sched_fifo,
+                disable_gc=dis_gc, mlock=ml, prealloc=prealloc,
+            )
+            dt = dt_all[1:]
+            in_spec = np.sum((dt >= 900) & (dt <= 1100))
+            pct_in = in_spec * 100.0 / len(dt)
+            results.append({
+                "label": label,
+                "pct_in": pct_in,
+                "mean": np.mean(dt),
+                "std": np.std(dt),
+                "max": np.max(dt),
+                "p99": np.percentile(dt, 99),
+                "p999": np.percentile(dt, 99.9),
+            })
+            color = GREEN if pct_in >= 99 else YELLOW if pct_in >= 95 else RED
+            sys.stdout.write(f"\r  {BOLD}{label:<25}{RST} {color}{pct_in:.2f}%{RST} in spec, "
+                             f"std={np.std(dt):.1f}us, p99={np.percentile(dt, 99):.0f}us, "
+                             f"max={np.max(dt):.0f}us\n")
+            sys.stdout.flush()
+    finally:
+        robot.stop()
+        try:
+            client.release_token()
+            _clear_token(robot_ip)
+        except Exception:
+            pass
+
+    # --- Comparison table ---
+    print(f"\n  {BOLD}=== Comparison ==={RST}\n")
+    print(f"    {'Config':<25} {'In-spec':>8} {'std':>8} {'p99':>8} {'p99.9':>8} {'max':>8}")
+    print(f"    {'─'*25} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
+    best = max(results, key=lambda r: r["pct_in"])
+    for r in results:
+        is_best = r is best
+        marker = f" {GREEN}★{RST}" if is_best else ""
+        color = GREEN if r["pct_in"] >= 99 else YELLOW if r["pct_in"] >= 95 else RED
+        print(f"    {r['label']:<25} {color}{r['pct_in']:>7.2f}%{RST} "
+              f"{r['std']:>7.1f} {r['p99']:>7.0f} {r['p999']:>7.0f} {r['max']:>7.0f}{marker}")
+    print(f"\n  {GREEN}Best: {best['label']}{RST}\n")
+
+
 def cmd_rt_benchmark(args):
     """Benchmark the 1kHz control loop real-time performance."""
     import mujoco
@@ -1445,8 +1754,22 @@ def cmd_rt_benchmark(args):
     duration = args.duration
     use_v2 = args.v2
 
+    cpu_pin = args.cpu_pin
+    sched_fifo = args.sched_fifo
+    all_combos = args.all_combos
+
+    if all_combos:
+        _run_all_combos(args)
+        return
+
     mode_label = "v2 (RT thread)" if use_v2 else "v1 (asyncio)"
-    print(f"\n  {BOLD}aiofranka rt-benchmark{RST} {DIM}|{RST} {mode_label} {DIM}({robot_ip}){RST}")
+    rt_flags = []
+    if cpu_pin is not None:
+        rt_flags.append(f"cpu={cpu_pin}")
+    if sched_fifo is not None:
+        rt_flags.append(f"FIFO={sched_fifo}")
+    rt_label = f" [{', '.join(rt_flags)}]" if rt_flags else ""
+    print(f"\n  {BOLD}aiofranka rt-benchmark{RST} {DIM}|{RST} {mode_label}{rt_label} {DIM}({robot_ip}){RST}")
     print(f"  {DIM}Duration: {duration:.0f}s — hold position with zero torque{RST}\n")
 
     # --- Setup: unlock + FCI ---
@@ -1501,102 +1824,12 @@ def cmd_rt_benchmark(args):
     robot = RobotInterface(robot_ip)
     robot.start()
 
-    model = robot.model
-    data = robot.data
-    site_id = robot.site_id
-    tc = robot.torque_controller
-
-    # Phase names for profiling
     PHASES = ["readOnce", "mj_fwd", "state_build", "ctrl_law", "shm_write"]
 
-    n_iters = int(duration * 1000)
-    dt_all = np.empty(n_iters, dtype=np.float64)
-    phase_all = np.empty((n_iters, len(PHASES)), dtype=np.float64)
-
-    import pylibfranka
-
     try:
-        # Warm up (500 iterations = 0.5s)
-        for _ in range(500):
-            robot_state, _ = tc.readOnce()
-            data.qpos[:] = robot_state.q
-            data.qvel[:] = robot_state.dq
-            data.ctrl[:] = robot_state.tau_J_d
-            mujoco.mj_forward(model, data)
-            torque_cmd = pylibfranka.Torques([0.0] * 7)
-            torque_cmd.motion_finished = False
-            tc.writeOnce(torque_cmd)
-
-        print(f"  Warm-up done, collecting {n_iters} samples...\n")
-
-        last_t = time.perf_counter()
-        for i in range(n_iters):
-            # Phase 0: readOnce
-            t0 = time.perf_counter()
-            robot_state, _ = tc.readOnce()
-            t1 = time.perf_counter()
-
-            # Phase 1: mj_forward
-            data.qpos[:] = robot_state.q
-            data.qvel[:] = robot_state.dq
-            data.ctrl[:] = robot_state.tau_J_d
-            mujoco.mj_forward(model, data)
-            t2 = time.perf_counter()
-
-            # Phase 2: state_build (ee, jac, mm)
-            ee_xyz = data.site(site_id).xpos
-            ee_mat = data.site(site_id).xmat.reshape(3, 3)
-            ee = np.eye(4)
-            ee[:3, :3] = ee_mat
-            ee[:3, 3] = ee_xyz
-            jac = np.zeros((6, 7))
-            mujoco.mj_jacSite(model, data, jac[:3], jac[3:], site_id)
-            mm = np.zeros((7, 7))
-            mujoco.mj_fullM(model, mm, data.qM)
-            t3 = time.perf_counter()
-
-            # Phase 3: ctrl_law (impedance hold — same as server idle)
-            q = np.array(data.qpos)
-            dq = np.array(data.qvel)
-            kp = np.ones(7) * 80
-            kd = np.ones(7) * 4
-            tau = kp * (q - q) - kd * dq  # hold current position
-            torque_cmd = pylibfranka.Torques(tau.tolist())
-            torque_cmd.motion_finished = False
-            tc.writeOnce(torque_cmd)
-            t4 = time.perf_counter()
-
-            # Phase 4: shm_write (simulate the overhead)
-            _ = {
-                "qpos": np.array(data.qpos),
-                "qvel": np.array(data.qvel),
-                "ee": ee.copy(),
-                "jac": jac.copy(),
-                "mm": mm.copy(),
-                "last_torque": np.array(data.ctrl),
-            }
-            t5 = time.perf_counter()
-
-            # Record
-            dt_all[i] = (t0 - last_t) * 1e6  # us since last iteration
-            phase_all[i, 0] = (t1 - t0) * 1e6
-            phase_all[i, 1] = (t2 - t1) * 1e6
-            phase_all[i, 2] = (t3 - t2) * 1e6
-            phase_all[i, 3] = (t4 - t3) * 1e6
-            phase_all[i, 4] = (t5 - t4) * 1e6
-            last_t = t0
-
-            # Progress
-            if (i + 1) % 2000 == 0:
-                pct = (i + 1) * 100 // n_iters
-                filled = pct * 20 // 100
-                bar = "\u2588" * filled + "\u2591" * (20 - filled)
-                sys.stdout.write(f"\r  [{bar}] {pct}%")
-                sys.stdout.flush()
-
-        sys.stdout.write("\r" + " " * 40 + "\r")
-        sys.stdout.flush()
-
+        dt_all, phase_all, PHASES = _run_bench_loop(
+            robot, duration, cpu_pin=cpu_pin, sched_fifo=sched_fifo
+        )
     finally:
         robot.stop()
         try:
@@ -1606,13 +1839,16 @@ def cmd_rt_benchmark(args):
             pass
 
     # --- Print report ---
-    # Skip first iteration (no valid dt)
-    dt = dt_all[1:]
-    phases = phase_all[1:]
-    total_compute = phases.sum(axis=1)  # total compute per iteration
+    # dt_all[i] = t0[i] - t0[i-1] = loop time of iteration i-1
+    # phase_all[i] = phases of iteration i
+    # To align: dt[k] = dt_all[k+1] = loop time of iteration k
+    #           phases[k] = phase_all[k] = phases of iteration k
+    dt = dt_all[1:]       # skip first (no previous t0)
+    phases = phase_all[:-1]  # drop last (no dt for it)
+    total_compute = phases.sum(axis=1)
 
     print(f"  {BOLD}=== RT Benchmark Results ==={RST}")
-    print(f"  {DIM}Samples: {len(dt)}, Duration: {duration:.0f}s, Mode: {mode_label}{RST}\n")
+    print(f"  {DIM}Samples: {len(dt)}, Duration: {duration:.0f}s, Mode: {mode_label}{rt_label}{RST}\n")
 
     # Iteration timing
     print(f"  {BOLD}Iteration timing (target: 1000us){RST}")
@@ -1643,16 +1879,58 @@ def cmd_rt_benchmark(args):
 
     # Per-phase breakdown
     print(f"  {BOLD}Per-phase breakdown (us){RST}")
-    print(f"    {'Phase':<14} {'mean':>8} {'std':>8} {'max':>8} {'p99':>8}")
-    print(f"    {'─'*14} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
+    print(f"    {'Phase':<14} {'mean':>8} {'std':>8} {'p99':>8} {'p99.9':>8} {'max':>8}")
+    print(f"    {'─'*14} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
     for j, name in enumerate(PHASES):
         col = phases[:, j]
         print(f"    {name:<14} {np.mean(col):>8.1f} {np.std(col):>8.1f} "
-              f"{np.max(col):>8.1f} {np.percentile(col, 99):>8.1f}")
-    print(f"    {'─'*14} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
+              f"{np.percentile(col, 99):>8.1f} {np.percentile(col, 99.9):>8.1f} "
+              f"{np.max(col):>8.1f}")
+    print(f"    {'─'*14} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
     print(f"    {'TOTAL':<14} {np.mean(total_compute):>8.1f} {np.std(total_compute):>8.1f} "
-          f"{np.max(total_compute):>8.1f} {np.percentile(total_compute, 99):>8.1f}")
+          f"{np.percentile(total_compute, 99):>8.1f} {np.percentile(total_compute, 99.9):>8.1f} "
+          f"{np.max(total_compute):>8.1f}")
     print()
+
+    # Jitter attribution: for out-of-spec iterations, which phase spiked?
+    out_mask = (dt < 900) | (dt > 1100)
+    n_out = np.sum(out_mask)
+    if n_out > 0:
+        print(f"  {BOLD}Jitter attribution ({n_out} out-of-spec iterations){RST}")
+        # For each phase, compute its median value across ALL iterations
+        phase_medians = np.median(phases, axis=0)
+        # For out-of-spec iterations, compute excess over median for each phase
+        out_phases = phases[out_mask]
+        excess = out_phases - phase_medians  # excess time vs typical
+        # Count how often each phase was the dominant contributor
+        dominant = np.argmax(excess, axis=1)
+        print(f"    {'Phase':<14} {'blamed':>7} {'%blamed':>8} {'avg_excess':>11} {'max_excess':>11}")
+        print(f"    {'─'*14} {'─'*7} {'─'*8} {'─'*11} {'─'*11}")
+        for j, name in enumerate(PHASES):
+            mask_j = dominant == j
+            count_j = np.sum(mask_j)
+            pct_j = count_j * 100.0 / n_out if n_out > 0 else 0
+            avg_exc = np.mean(excess[mask_j, j]) if count_j > 0 else 0
+            max_exc = np.max(excess[mask_j, j]) if count_j > 0 else 0
+            bar_len = int(pct_j * 20 / 100) if pct_j > 0 else 0
+            bar = "█" * bar_len
+            color_code = RED if pct_j > 40 else YELLOW if pct_j > 15 else DIM
+            print(f"    {name:<14} {count_j:>7} {color_code}{pct_j:>7.1f}%{RST} "
+                  f"{avg_exc:>10.1f}us {max_exc:>10.1f}us  {color_code}{bar}{RST}")
+        print()
+
+        # Show the top 10 worst iterations with per-phase detail
+        worst_idx = np.argsort(dt)[-10:][::-1]
+        print(f"  {BOLD}Top 10 worst iterations{RST}")
+        header_phases = "  ".join(f"{name:>8}" for name in PHASES)
+        print(f"    {'#':>6} {'dt':>8}  {header_phases}  {'blame':>10}")
+        print(f"    {'─'*6} {'─'*8}  {'─' * (10 * len(PHASES) - 2)}  {'─'*10}")
+        for idx in worst_idx:
+            phase_vals = "  ".join(f"{phases[idx, j]:>8.1f}" for j in range(len(PHASES)))
+            blame_j = np.argmax(phases[idx] - phase_medians)
+            blame_name = PHASES[blame_j]
+            print(f"    {idx:>6} {dt[idx]:>8.1f}  {phase_vals}  {RED}{blame_name:>10}{RST}")
+        print()
 
     # ASCII histogram of iteration times
     print(f"  {BOLD}Iteration time distribution (us){RST}")
@@ -1781,6 +2059,12 @@ def main():
     p_bench.add_argument("--protocol", type=str, default="https", choices=["http", "https"])
     p_bench.add_argument("--duration", type=float, default=10.0, help="Benchmark duration in seconds (default: 10)")
     p_bench.add_argument("--v2", action="store_true", help="Use v2 RT-threaded control loop")
+    p_bench.add_argument("--cpu-pin", type=int, default=None, metavar="CORE",
+                         help="Pin benchmark thread to specific CPU core (e.g. --cpu-pin 31)")
+    p_bench.add_argument("--sched-fifo", type=int, default=None, metavar="PRIO", nargs="?", const=80,
+                         help="Set SCHED_FIFO real-time priority (default: 80, requires root/cap)")
+    p_bench.add_argument("--all-combos", action="store_true",
+                         help="Run all combinations of RT settings and compare")
 
     args = parser.parse_args()
 
