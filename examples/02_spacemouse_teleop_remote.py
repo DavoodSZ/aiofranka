@@ -8,6 +8,7 @@ import time
 import numpy as np
 import aiofranka 
 from aiofranka import FrankaRemoteController
+from aiofranka import FrankaRemoteControllerV2
 from aiofranka.utils.spacemouse import SpaceMouse
 import threading
 import os

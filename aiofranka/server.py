@@ -21,6 +21,7 @@ import time
 import uuid
 
 import msgpack
+import mujoco
 import numpy as np
 import zmq
 
@@ -62,18 +63,74 @@ class ServerController(FrankaController):
         self._shm = shm_block
         self._last_error = None
 
+        # Pre-allocate reusable buffers to avoid per-iteration allocations
+        model = robot.model
+        self._ee_buf = np.eye(4)
+        self._jac_buf = np.zeros((6, 7))
+        self._mm_buf = np.zeros((7, 7))
+        self._qpos_buf = np.empty(model.nq)
+        self._qvel_buf = np.empty(model.nv)
+        self._ctrl_buf = np.empty(model.nu)
+        self._zero_torque = np.zeros(7)
+
     def step(self):
-        super().step()
-        # Write robot state + controller state to shared memory (~1us overhead)
-        if self.state is not None:
-            full_state = dict(self.state)
-            full_state["q_desired"] = self.q_desired
-            full_state["ee_desired"] = self.ee_desired
-            full_state["torque"] = getattr(self, "torque", np.zeros(7))
-            full_state["initial_qpos"] = self.initial_qpos
-            full_state["initial_ee"] = self.initial_ee
-            self._shm.write_state(full_state)
-            self._shm.write_ctrl_type(self.type)
+        robot = self.robot
+        model = robot.model
+        data = robot.data
+
+        # Sync MuJoCo with real robot state (readOnce blocks for 1kHz tick)
+        if robot.real:
+            robot_state, _ = robot.torque_controller.readOnce()
+            data.qpos[:] = robot_state.q
+            data.qvel[:] = robot_state.dq
+            data.ctrl[:] = robot_state.tau_J_d
+            mujoco.mj_forward(model, data)
+
+        # Build state using pre-allocated buffers (no per-iteration allocation)
+        self._ee_buf[:3, :3] = data.site(robot.site_id).xmat.reshape(3, 3)
+        self._ee_buf[:3, 3] = data.site(robot.site_id).xpos
+
+        self._jac_buf[:] = 0
+        mujoco.mj_jacSite(model, data, self._jac_buf[:3], self._jac_buf[3:], robot.site_id)
+
+        self._mm_buf[:] = 0
+        mujoco.mj_fullM(model, self._mm_buf, data.qM)
+
+        np.copyto(self._qpos_buf, data.qpos)
+        np.copyto(self._qvel_buf, data.qvel)
+        np.copyto(self._ctrl_buf, data.ctrl)
+
+        self.state = {
+            "qpos": self._qpos_buf,
+            "qvel": self._qvel_buf,
+            "ee": self._ee_buf,
+            "jac": self._jac_buf,
+            "mm": self._mm_buf,
+            "last_torque": self._ctrl_buf,
+        }
+
+        # Run control law
+        if self.type == "impedance":
+            self._impedance_step(self.state)
+        elif self.type == "pid":
+            self._pid_step(self.state)
+        elif self.type == "osc":
+            self._osc_step(self.state)
+        elif self.type == "torque":
+            self._torque_step(self.state)
+
+        # Write to shared memory
+        full_state = {
+            "qpos": self._qpos_buf, "qvel": self._qvel_buf, "ee": self._ee_buf,
+            "jac": self._jac_buf, "mm": self._mm_buf, "last_torque": self._ctrl_buf,
+            "q_desired": self.q_desired,
+            "ee_desired": self.ee_desired,
+            "torque": getattr(self, "torque", self._zero_torque),
+            "initial_qpos": self.initial_qpos,
+            "initial_ee": self.initial_ee,
+        }
+        self._shm.write_state(full_state)
+        self._shm.write_ctrl_type(self.type)
 
     async def start(self):
         """Override start() to run robot.start() in a thread with timeout.
@@ -98,6 +155,23 @@ class ServerController(FrankaController):
 
     async def _run(self):
         """Override _run to NOT sys.exit(1) — let the server handle recovery."""
+        # Pin to last CPU core for cache locality
+        n_cpus = os.cpu_count() or 1
+        rt_core = n_cpus - 1
+        try:
+            os.sched_setaffinity(0, {rt_core})
+            logger.info(f"Control loop pinned to CPU {rt_core}")
+        except Exception as e:
+            logger.warning(f"Could not pin to CPU {rt_core}: {e}")
+        # Elevate to SCHED_FIFO real-time priority
+        try:
+            os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(80))
+            logger.info("Control loop set to SCHED_FIFO priority 80")
+        except PermissionError:
+            logger.warning("Could not set SCHED_FIFO (no permission) — run with CAP_SYS_NICE")
+        except Exception as e:
+            logger.warning(f"Could not set SCHED_FIFO: {e}")
+
         self.running = True
         try:
             while self.running:
