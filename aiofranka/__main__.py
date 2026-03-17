@@ -1451,6 +1451,7 @@ def _run_bench_loop(robot, duration, cpu_pin=None, sched_fifo=None,
     n_iters = int(duration * 1000)
     dt_all = np.empty(n_iters, dtype=np.float64)
     phase_all = np.empty((n_iters, len(PHASES)), dtype=np.float64)
+    success_rate_all = np.empty(n_iters, dtype=np.float64)
 
     # Pre-allocate reusable buffers (used when prealloc=True)
     _ee = np.eye(4)
@@ -1546,6 +1547,7 @@ def _run_bench_loop(robot, duration, cpu_pin=None, sched_fifo=None,
             phase_all[i, 2] = (t3 - t2) * 1e6
             phase_all[i, 3] = (t4 - t3) * 1e6
             phase_all[i, 4] = (t5 - t4) * 1e6
+            success_rate_all[i] = robot_state.control_command_success_rate
             last_t = t0
     else:
         last_t = time.perf_counter()
@@ -1594,6 +1596,7 @@ def _run_bench_loop(robot, duration, cpu_pin=None, sched_fifo=None,
             phase_all[i, 2] = (t3 - t2) * 1e6
             phase_all[i, 3] = (t4 - t3) * 1e6
             phase_all[i, 4] = (t5 - t4) * 1e6
+            success_rate_all[i] = robot_state.control_command_success_rate
             last_t = t0
 
     # Restore
@@ -1614,7 +1617,7 @@ def _run_bench_loop(robot, duration, cpu_pin=None, sched_fifo=None,
         except Exception:
             pass
 
-    return dt_all, phase_all, PHASES
+    return dt_all, phase_all, PHASES, success_rate_all
 
 
 def _run_all_combos(args):
@@ -1696,13 +1699,14 @@ def _run_all_combos(args):
         for label, cpu_pin, sched_fifo, dis_gc, ml, prealloc in combos:
             sys.stdout.write(f"  Running: {BOLD}{label}{RST} ...")
             sys.stdout.flush()
-            dt_all, phase_all, phases = _run_bench_loop(
+            dt_all, phase_all, phases, sr_all = _run_bench_loop(
                 robot, duration, cpu_pin=cpu_pin, sched_fifo=sched_fifo,
                 disable_gc=dis_gc, mlock=ml, prealloc=prealloc,
             )
             dt = dt_all[1:]
             in_spec = np.sum((dt >= 900) & (dt <= 1100))
             pct_in = in_spec * 100.0 / len(dt)
+            sr_min = np.min(sr_all)
             results.append({
                 "label": label,
                 "pct_in": pct_in,
@@ -1711,11 +1715,14 @@ def _run_all_combos(args):
                 "max": np.max(dt),
                 "p99": np.percentile(dt, 99),
                 "p999": np.percentile(dt, 99.9),
+                "sr_min": sr_min,
             })
             color = GREEN if pct_in >= 99 else YELLOW if pct_in >= 95 else RED
+            sr_color = GREEN if sr_min >= 0.99 else YELLOW if sr_min >= 0.95 else RED
             sys.stdout.write(f"\r  {BOLD}{label:<25}{RST} {color}{pct_in:.2f}%{RST} in spec, "
                              f"std={np.std(dt):.1f}us, p99={np.percentile(dt, 99):.0f}us, "
-                             f"max={np.max(dt):.0f}us\n")
+                             f"max={np.max(dt):.0f}us, "
+                             f"sr_min={sr_color}{sr_min:.4f}{RST}\n")
             sys.stdout.flush()
     finally:
         robot.stop()
@@ -1727,15 +1734,17 @@ def _run_all_combos(args):
 
     # --- Comparison table ---
     print(f"\n  {BOLD}=== Comparison ==={RST}\n")
-    print(f"    {'Config':<25} {'In-spec':>8} {'std':>8} {'p99':>8} {'p99.9':>8} {'max':>8}")
-    print(f"    {'─'*25} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
+    print(f"    {'Config':<25} {'In-spec':>8} {'std':>8} {'p99':>8} {'p99.9':>8} {'max':>8} {'sr_min':>8}")
+    print(f"    {'─'*25} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
     best = max(results, key=lambda r: r["pct_in"])
     for r in results:
         is_best = r is best
         marker = f" {GREEN}★{RST}" if is_best else ""
         color = GREEN if r["pct_in"] >= 99 else YELLOW if r["pct_in"] >= 95 else RED
+        sr_color = GREEN if r["sr_min"] >= 0.99 else YELLOW if r["sr_min"] >= 0.95 else RED
         print(f"    {r['label']:<25} {color}{r['pct_in']:>7.2f}%{RST} "
-              f"{r['std']:>7.1f} {r['p99']:>7.0f} {r['p999']:>7.0f} {r['max']:>7.0f}{marker}")
+              f"{r['std']:>7.1f} {r['p99']:>7.0f} {r['p999']:>7.0f} {r['max']:>7.0f} "
+              f"{sr_color}{r['sr_min']:>7.4f}{RST}{marker}")
     print(f"\n  {GREEN}Best: {best['label']}{RST}\n")
 
 
@@ -1827,7 +1836,7 @@ def cmd_rt_benchmark(args):
     PHASES = ["readOnce", "mj_fwd", "state_build", "ctrl_law", "shm_write"]
 
     try:
-        dt_all, phase_all, PHASES = _run_bench_loop(
+        dt_all, phase_all, PHASES, success_rate = _run_bench_loop(
             robot, duration, cpu_pin=cpu_pin, sched_fifo=sched_fifo
         )
     finally:
@@ -1875,6 +1884,21 @@ def cmd_rt_benchmark(args):
     print(f"  {BOLD}Timing accuracy{RST}")
     print(f"    In spec (900-1100us):  {color}{pct_in:.2f}%{RST} ({in_spec}/{len(dt)})")
     print(f"    Out of spec:           {out_spec}")
+    print()
+
+    # Control command success rate
+    sr = success_rate[:-1]  # align with dt (drop last, same as phases)
+    sr_mean = np.mean(sr)
+    sr_min = np.min(sr)
+    sr_color = GREEN if sr_min >= 0.99 else YELLOW if sr_min >= 0.95 else RED
+    print(f"  {BOLD}Control command success rate{RST}")
+    print(f"    mean   = {sr_color}{sr_mean:.4f}{RST}")
+    print(f"    min    = {sr_color}{sr_min:.4f}{RST}")
+    n_drops = np.sum(sr < 1.0)
+    if n_drops > 0:
+        print(f"    drops  = {RED}{n_drops}{RST} iterations below 1.0")
+    else:
+        print(f"    drops  = {GREEN}0{RST}")
     print()
 
     # Per-phase breakdown
