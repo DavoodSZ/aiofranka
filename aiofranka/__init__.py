@@ -35,6 +35,7 @@ from aiofranka.server import start, stop, lock, unlock, set_configuration
 # Optional gripper support - only import if dependencies are available
 try:
     from aiofranka.gripper import GripperController, RobotiqGripperInterface, create_gripper
+    from aiofranka.gripper_remote import GripperRemoteController
     _HAS_ROBOTIQ = True
 except ImportError:
     _HAS_ROBOTIQ = False
@@ -43,4 +44,4 @@ __version__ = "0.1.0"
 __all__ = ["RobotInterface", "FrankaController", "FrankaRemoteController", "FrankaRemoteControllerV2", "ServerDiedError", "asyncify", "async_input", "CudaInferenceThread", "mpify", "start", "stop", "lock", "unlock", "set_configuration"]
 
 if _HAS_ROBOTIQ:
-    __all__.extend(["GripperController", "RobotiqGripperInterface", "create_gripper"])
+    __all__.extend(["GripperController", "GripperRemoteController", "RobotiqGripperInterface", "create_gripper"])

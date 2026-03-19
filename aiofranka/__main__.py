@@ -304,7 +304,7 @@ def cmd_gravcomp(args):
         print(f"  {DIM}You can freely move the robot by hand. Press Ctrl+C to stop.{RST}\n")
 
         # Run the control loop (blocks until Ctrl+C)
-        run_gravcomp_loop(robot_ip, damping=damping)
+        run_gravcomp_loop(robot_ip, damping=damping, http_port=args.http_port)
 
         # Teardown — leave robot unlocked with FCI active, just release token
         print()  # blank line after ^C
@@ -1748,6 +1748,26 @@ def _run_all_combos(args):
     print(f"\n  {GREEN}Best: {best['label']}{RST}\n")
 
 
+def cmd_gripper(args):
+    """Open or close the Robotiq gripper."""
+    from aiofranka.gripper_remote import GripperRemoteController
+
+    gripper = GripperRemoteController(args.port)
+    gripper.start()
+    gripper.speed = args.speed
+    gripper.force = args.force
+
+    if args.open:
+        print("Opening gripper...")
+        gripper.open()
+    else:
+        print("Closing gripper...")
+        gripper.close()
+
+    gripper.wait_until_reached(timeout=5.0)
+    gripper.stop()
+
+
 def cmd_rt_benchmark(args):
     """Benchmark the 1kHz control loop real-time performance."""
     import mujoco
@@ -2004,6 +2024,8 @@ def main():
     p_gravcomp.add_argument("--protocol", type=str, default="https", choices=["http", "https"])
     p_gravcomp.add_argument("--damping", type=float, default=0.0,
                             help="Joint velocity damping (kd) per joint (default: 0)")
+    p_gravcomp.add_argument("--http-port", type=int, default=0,
+                            help="Serve GET /qpos on this port (e.g. 8080)")
 
     # home
     p_home = subparsers.add_parser("home", help="Move robot to home position")
@@ -2075,6 +2097,15 @@ def main():
     p_log.add_argument("-n", type=int, default=20, help="Number of lines to show (default: 20)")
     p_log.add_argument("-f", "--follow", action="store_true", help="Follow log output (like tail -f)")
 
+    # gripper
+    p_gripper = subparsers.add_parser("gripper", help="Open or close the Robotiq gripper")
+    p_gripper_action = p_gripper.add_mutually_exclusive_group(required=True)
+    p_gripper_action.add_argument("--open", action="store_true", help="Fully open the gripper")
+    p_gripper_action.add_argument("--close", action="store_true", help="Fully close the gripper")
+    p_gripper.add_argument("--port", type=str, default="/dev/ttyUSB1", help="Serial port (default: /dev/ttyUSB1)")
+    p_gripper.add_argument("--speed", type=int, default=128, help="Gripper speed 1-255 (default: 128)")
+    p_gripper.add_argument("--force", type=int, default=128, help="Gripper force 0-255 (default: 128)")
+
     # rt-benchmark
     p_bench = subparsers.add_parser("rt-benchmark", help="Benchmark 1kHz control loop real-time performance")
     p_bench.add_argument("--ip", type=str, default=None, help="Robot IP")
@@ -2114,6 +2145,8 @@ def main():
         cmd_config(args)
     elif args.command == "log":
         cmd_log(args)
+    elif args.command == "gripper":
+        cmd_gripper(args)
     elif args.command == "rt-benchmark":
         cmd_rt_benchmark(args)
     else:

@@ -1457,10 +1457,12 @@ def start_subprocess(ip: str, *,
 
 # ── Gravity compensation mode ─────────────────────────────────────────────
 
-async def _run_gravcomp_loop(robot_ip: str, damping: float = 0.0):
+async def _run_gravcomp_loop(robot_ip: str, damping: float = 0.0,
+                             http_port: int = 0):
     """Run gravity compensation control loop until Ctrl+C.
 
     Assumes robot is already unlocked with FCI active.
+    If http_port > 0, serves GET /qpos on that port returning JSON joint positions.
     """
     from aiofranka.controller import FrankaController
 
@@ -1476,6 +1478,51 @@ async def _run_gravcomp_loop(robot_ip: str, damping: float = 0.0):
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop_event.set)
 
+    # Optional HTTP server for querying qpos
+    http_server = None
+    if http_port > 0:
+        async def _handle_http(reader, writer):
+            try:
+                request_line = await reader.readline()
+                # Drain remaining headers
+                while True:
+                    line = await reader.readline()
+                    if line in (b"\r\n", b"\n", b""):
+                        break
+
+                path = request_line.decode().split(" ")[1] if request_line else "/"
+
+                if path == "/qpos":
+                    state = getattr(controller, "state", None)
+                    if state and "qpos" in state:
+                        qpos = list(np.round(state["qpos"], 6))
+                    else:
+                        qpos = None
+                    body = json.dumps({"qpos": qpos}).encode()
+                    header = (
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"Content-Type: application/json\r\n"
+                        b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                        b"\r\n"
+                    )
+                else:
+                    body = b'{"error": "not found, try GET /qpos"}'
+                    header = (
+                        b"HTTP/1.1 404 Not Found\r\n"
+                        b"Content-Type: application/json\r\n"
+                        b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                        b"\r\n"
+                    )
+                writer.write(header + body)
+                await writer.drain()
+            except Exception:
+                pass
+            finally:
+                writer.close()
+
+        http_server = await asyncio.start_server(_handle_http, "0.0.0.0", http_port)
+        print(f"  HTTP server listening on :{http_port}  →  GET /qpos")
+
     ctrl_task = await controller.start()
 
     # Wait until Ctrl+C or control loop exits
@@ -1484,6 +1531,10 @@ async def _run_gravcomp_loop(robot_ip: str, damping: float = 0.0):
         return_when=asyncio.FIRST_COMPLETED,
     )
 
+    if http_server is not None:
+        http_server.close()
+        await http_server.wait_closed()
+
     controller.running = False
     try:
         robot.stop()
@@ -1491,9 +1542,9 @@ async def _run_gravcomp_loop(robot_ip: str, damping: float = 0.0):
         pass
 
 
-def run_gravcomp_loop(robot_ip: str, damping: float = 0.0):
+def run_gravcomp_loop(robot_ip: str, damping: float = 0.0, http_port: int = 0):
     """Run gravity compensation control loop (blocks until Ctrl+C)."""
-    asyncio.run(_run_gravcomp_loop(robot_ip, damping=damping))
+    asyncio.run(_run_gravcomp_loop(robot_ip, damping=damping, http_port=http_port))
 
 
 _HOME_QPOS = [0, 0, 0.0, -1.57079, 0, 1.57079, -0.7853]
