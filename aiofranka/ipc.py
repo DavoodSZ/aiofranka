@@ -5,8 +5,11 @@ State is shared via multiprocessing.shared_memory for zero-copy reads at 1kHz.
 Commands are sent via ZMQ REQ/REP with msgpack serialization.
 """
 
+import os
 import struct
+import tempfile
 import time
+
 import numpy as np
 from multiprocessing.shared_memory import SharedMemory
 
@@ -24,6 +27,7 @@ _FIELDS = [
     ("jac", (6, 7), np.float64),
     ("mm", (7, 7), np.float64),
     ("last_torque", (7,), np.float64),
+    ("tau_ext_hat_filtered", (7,), np.float64),
     # Controller state
     ("q_desired", (7,), np.float64),
     ("ee_desired", (4, 4), np.float64),
@@ -88,16 +92,20 @@ def shm_name_for_ip(robot_ip: str) -> str:
     return f"aiofranka_{robot_ip.replace('.', '_')}"
 
 
+def _ipc_stem(robot_ip: str) -> str:
+    return f"aiofranka_{robot_ip.replace('.', '_')}_{os.getuid()}"
+
+
 def zmq_endpoint_for_ip(robot_ip: str) -> str:
-    return f"ipc:///tmp/aiofranka_{robot_ip.replace('.', '_')}.sock"
+    return f"ipc://{tempfile.gettempdir()}/{_ipc_stem(robot_ip)}.sock"
 
 
 def progress_file_for_ip(robot_ip: str) -> str:
-    return f"/tmp/aiofranka_{robot_ip.replace('.', '_')}.progress"
+    return f"{tempfile.gettempdir()}/{_ipc_stem(robot_ip)}.progress"
 
 
 def pid_file_for_ip(robot_ip: str) -> str:
-    return f"/tmp/aiofranka_{robot_ip.replace('.', '_')}.pid"
+    return f"{tempfile.gettempdir()}/{_ipc_stem(robot_ip)}.pid"
 
 
 class StateBlock:
